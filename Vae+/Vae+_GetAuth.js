@@ -1,402 +1,223 @@
 /*
- * Vae+ 签到鉴权捕获器 - Final
- * 适用：Loon
- *
- * 功能：
- * 1. 监听 api1.starfans.com/auth/
- * 2. 从响应 requestVar 中识别 /USER_HOME/getRecord.json
- * 3. 只保存真正与签到相关的请求
- * 4. 保存完整请求模板，供后续定时签到脚本使用
- * 5. 保存 userId / uvsign / uvkey / registrationId 等参数
- * 6. 首次捕获或数据变化时发送 Loon 通知
- *
- * Persistent Store:
- * VAE_SIGN_REQUEST
- * VAE_SIGN_AUTH
- * VAE_SIGN_FP
- */
+Vae+ Auth Capture Final
+Loon
 
-const KEY_REQUEST = "VAE_SIGN_REQUEST";
-const KEY_AUTH    = "VAE_SIGN_AUTH";
-const KEY_FP      = "VAE_SIGN_FP";
+保存:
+VAE_SIGN_REQUEST
+VAE_SIGN_AUTH
+*/
 
-const TARGET_ACTION = "/USER_HOME/getRecord.json";
 
-function log(msg) {
-    console.log("[Vae+] " + msg);
+const REQUEST_KEY = "VAE_SIGN_REQUEST";
+const AUTH_KEY = "VAE_SIGN_AUTH";
+
+function log(t){
+    console.log("[Vae+] " + t);
 }
 
-function notify(title, subtitle, body) {
-    try {
-        $notification.post(title, subtitle || "", body || "");
-    } catch (e) {
-        log("通知发送失败: " + e);
-    }
-}
 
-function safeJson(str) {
-    try {
-        return JSON.parse(str);
-    } catch (e) {
+function parseJSON(t){
+    try{
+        return JSON.parse(t);
+    }catch(e){
         return null;
     }
 }
 
-function decode(str) {
-    if (!str) return "";
 
-    try {
-        return decodeURIComponent(
-            String(str).replace(/\+/g, "%20")
-        );
-    } catch (e) {
-        return String(str);
-    }
-}
+function parseForm(str){
 
-function parseForm(str) {
-    const result = {};
+    let obj={};
 
-    if (!str) return result;
+    if(!str) return obj;
 
-    String(str).split("&").forEach(item => {
-        const index = item.indexOf("=");
 
-        if (index === -1) {
-            if (item) result[decode(item)] = "";
-            return;
+    str.split("&").forEach(i=>{
+
+        let p=i.indexOf("=");
+
+        if(p>0){
+
+            obj[
+                decodeURIComponent(i.slice(0,p))
+            ] =
+            decodeURIComponent(
+                i.slice(p+1)
+            );
+
         }
 
-        const key = decode(item.substring(0, index));
-        const val = decode(item.substring(index + 1));
-
-        result[key] = val;
     });
 
-    return result;
+    return obj;
 }
 
-function getHeader(headers, name) {
-    if (!headers) return "";
 
-    const target = name.toLowerCase();
 
-    for (const key in headers) {
-        if (key.toLowerCase() === target) {
-            return headers[key];
-        }
-    }
+function save(key,data){
 
-    return "";
-}
-
-function cleanHeaders(headers) {
-    const result = {};
-
-    if (!headers) return result;
-
-    /*
-     * 保存真正可能影响重放的 Header。
-     * Content-Length 不保存，让 Loon 自动计算。
-     */
-    const allow = [
-        "user-agent",
-        "content-type",
-        "cookie",
-        "authorization",
-        "accept",
-        "accept-language"
-    ];
-
-    for (const key in headers) {
-        const lower = key.toLowerCase();
-
-        if (allow.includes(lower)) {
-            result[key] = headers[key];
-        }
-    }
-
-    return result;
-}
-
-function parseRequestVar(requestVar) {
-    const result = {
-        raw: requestVar || ""
-    };
-
-    if (!requestVar) return result;
-
-    const params = parseForm(requestVar);
-
-    result.uri = params.uri || "";
-    result.userId = params.userId || "";
-    result.registrationId = params.registrationId || "";
-    result.action = params.action || "";
-
-    /*
-     * data 本身通常是 JSON
-     */
-    if (params.data) {
-        const dataText = decode(params.data);
-        const dataJson = safeJson(dataText);
-
-        if (dataJson) {
-            result.data = dataJson;
-
-            result.userId =
-                dataJson.userId ||
-                dataJson.self_userid ||
-                result.userId ||
-                "";
-
-            result.uvsign =
-                dataJson.uvsign ||
-                "";
-
-            result.uvkey =
-                dataJson.uvkey ||
-                "";
-
-            result.registrationId =
-                dataJson.registrationId ||
-                result.registrationId ||
-                "";
-
-            result.sysModel =
-                dataJson.sysModel ||
-                "";
-
-            result.sysVersion =
-                dataJson.sys_v ||
-                dataJson.sysVersion ||
-                "";
-
-            result.appVersion =
-                dataJson.app_v ||
-                "";
-
-            result.terminal =
-                dataJson.terminal ||
-                "";
-        }
-    }
-
-    return result;
-}
-
-function fingerprint(obj) {
-    /*
-     * 不需要密码学哈希。
-     * 只用于判断捕获模板有没有变化。
-     */
-    const text = JSON.stringify(obj);
-
-    let hash = 0;
-
-    for (let i = 0; i < text.length; i++) {
-        hash = ((hash << 5) - hash) + text.charCodeAt(i);
-        hash |= 0;
-    }
-
-    return String(hash);
-}
-
-try {
-
-    if (!$request || !$response) {
-        log("缺少 request/response 对象");
-        $done({});
-        return;
-    }
-
-    const responseBody = $response.body || "";
-    const json = safeJson(responseBody);
-
-    if (!json) {
-        log("响应不是可解析 JSON，跳过");
-        $done({});
-        return;
-    }
-
-    /*
-     * HAR 已确认 Vae+ auth 响应中会返回 requestVar，
-     * 真实 action 就在这里。
-     */
-    const requestVar = json.requestVar || "";
-
-    if (!requestVar) {
-        log("当前 auth 响应没有 requestVar，跳过");
-        $done({});
-        return;
-    }
-
-    const auth = parseRequestVar(requestVar);
-
-    /*
-     * 只捕获真正的签到记录请求。
-     */
-    if (
-        auth.action !== TARGET_ACTION &&
-        !requestVar.includes(TARGET_ACTION)
-    ) {
-        log("非签到请求: " + (auth.action || auth.uri || "unknown"));
-        $done({});
-        return;
-    }
-
-    /*
-     * 提取 q。
-     * GET: /auth/?q=...
-     * POST: body q=...
-     */
-    let q = "";
-
-    try {
-        const url = $request.url || "";
-
-        if (url.includes("?")) {
-            const query = url.substring(url.indexOf("?") + 1);
-            const params = parseForm(query);
-
-            if (params.q) {
-                q = params.q;
-            }
-        }
-    } catch (e) {}
-
-    if (!q && $request.body) {
-        try {
-            const bodyParams = parseForm($request.body);
-
-            if (bodyParams.q) {
-                q = bodyParams.q;
-            }
-        } catch (e) {}
-    }
-
-    const requestTemplate = {
-        version: 1,
-
-        url: $request.url || "",
-        method: ($request.method || "GET").toUpperCase(),
-
-        headers: cleanHeaders($request.headers),
-
-        body: $request.body || "",
-
-        q: q,
-
-        action: auth.action,
-
-        capturedAt: new Date().toISOString()
-    };
-
-    const authData = {
-        version: 1,
-
-        action: auth.action || TARGET_ACTION,
-
-        userId: auth.userId || "",
-        uvsign: auth.uvsign || "",
-        uvkey: auth.uvkey || "",
-        registrationId: auth.registrationId || "",
-
-        sysModel: auth.sysModel || "",
-        sysVersion: auth.sysVersion || "",
-        appVersion: auth.appVersion || "",
-        terminal: auth.terminal || "",
-
-        cookie: getHeader($request.headers, "Cookie"),
-        userAgent: getHeader($request.headers, "User-Agent"),
-
-        requestVar: requestVar,
-
-        capturedAt: new Date().toISOString()
-    };
-
-    /*
-     * 用核心字段判断是否真的变化。
-     * capturedAt 不参与 fingerprint，否则每次都会认为变化。
-     */
-    const fpData = {
-        method: requestTemplate.method,
-        url: requestTemplate.url,
-        body: requestTemplate.body,
-        q: requestTemplate.q,
-
-        userId: authData.userId,
-        uvsign: authData.uvsign,
-        uvkey: authData.uvkey,
-        registrationId: authData.registrationId,
-        cookie: authData.cookie
-    };
-
-    const newFP = fingerprint(fpData);
-    const oldFP = $persistentStore.read(KEY_FP) || "";
-
-    const ok1 = $persistentStore.write(
-        JSON.stringify(requestTemplate),
-        KEY_REQUEST
+    $persistentStore.write(
+        JSON.stringify(data),
+        key
     );
 
-    const ok2 = $persistentStore.write(
-        JSON.stringify(authData),
-        KEY_AUTH
-    );
+}
 
-    const ok3 = $persistentStore.write(
-        newFP,
-        KEY_FP
-    );
 
-    if (!ok1 || !ok2 || !ok3) {
-        throw new Error("persistentStore 写入失败");
+
+try{
+
+
+    if(!$response.body){
+        $done({});
+        return;
     }
 
-    log("已捕获签到请求");
-    log("action = " + authData.action);
-    log("userId = " + (authData.userId || "未解析"));
-    log("method = " + requestTemplate.method);
 
-    /*
-     * 第一次捕获，或者鉴权发生变化时才通知。
-     * 避免每次进入页面连续弹几十个通知。
-     */
-    if (!oldFP) {
+    let res =
+    parseJSON(
+        $response.body
+    );
 
-        notify(
-            "Vae+",
-            "签到鉴权获取成功",
-            authData.userId
-                ? "账号 " + authData.userId + " 已完成持久化"
-                : "签到请求模板已完成持久化"
+
+    if(!res){
+        $done({});
+        return;
+    }
+
+
+    let requestVar =
+    res.requestVar || "";
+
+
+    if(
+        !requestVar ||
+        !requestVar.includes(
+            "/USER_HOME/getRecord.json"
+        )
+    ){
+
+        $done({});
+        return;
+    }
+
+
+
+    let url =
+    $request.url || "";
+
+
+    let q="";
+
+
+    if(url.includes("?")){
+
+        let query =
+        url.split("?")[1];
+
+        let params =
+        parseForm(query);
+
+
+        q=params.q || "";
+
+    }
+
+
+
+    if(!q && $request.body){
+
+        let body =
+        parseForm(
+            $request.body
         );
 
-    } else if (oldFP !== newFP) {
+        q=body.q || "";
 
-        notify(
-            "Vae+",
-            "签到鉴权已更新",
-            "新的签到请求模板已自动保存"
-        );
-
-    } else {
-
-        /*
-         * 数据完全没变化，不弹窗。
-         */
-        log("签到鉴权未变化，不重复通知");
     }
 
-} catch (e) {
 
-    log("捕获失败: " + e);
 
-    notify(
+    let requestData={
+
+        url:url,
+
+        method:
+        $request.method || "POST",
+
+
+        headers:
+        $request.headers || {},
+
+
+        body:
+        $request.body || "",
+
+
+        q:q,
+
+
+        action:
+        "/USER_HOME/getRecord.json",
+
+
+        updateTime:
+        new Date().toISOString()
+
+    };
+
+
+
+    let authData={
+
+        action:
+        "/USER_HOME/getRecord.json",
+
+
+        q:q,
+
+
+        requestVar:requestVar,
+
+
+        updateTime:
+        new Date().toISOString()
+
+    };
+
+
+
+    save(
+        REQUEST_KEY,
+        requestData
+    );
+
+
+    save(
+        AUTH_KEY,
+        authData
+    );
+
+
+    log(
+        "签到请求已更新"
+    );
+
+
+    $notification.post(
         "Vae+",
-        "鉴权捕获失败",
-        String(e)
+        "签到授权更新",
+        "签到请求已保存"
     );
+
+
+}catch(e){
+
+    log(
+        "错误:"+e
+    );
+
 }
+
 
 $done({});
