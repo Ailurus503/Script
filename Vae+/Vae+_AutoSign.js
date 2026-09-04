@@ -15,7 +15,7 @@
  * - 自动重放签到请求
  * - 判断今日签到状态
  * - 首次成功：签到成功 ✅
- * - 当天重复执行：今日已签到 🎉
+ * - 当天重复执行：今日已签到，请勿重复签到 🎉
  * - 显示连续签到 / 累计签到
  * - 鉴权失效提醒
  * - 网络及服务器异常提醒
@@ -59,6 +59,7 @@ function cleanHeaders(headers) {
     for (const key in headers) {
         const lower = key.toLowerCase();
 
+        // 交给 Loon 自动生成，避免重放旧值
         if (
             lower === "content-length" ||
             lower === "host" ||
@@ -95,7 +96,10 @@ function findSignRecord(obj, depth) {
     for (const key in obj) {
         const value = obj[key];
 
-        if (value && typeof value === "object") {
+        if (
+            value &&
+            typeof value === "object"
+        ) {
             const found = findSignRecord(
                 value,
                 depth + 1
@@ -125,8 +129,13 @@ function getTodayString() {
     const d = new Date();
 
     const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
+    const m = String(
+        d.getMonth() + 1
+    ).padStart(2, "0");
+
+    const day = String(
+        d.getDate()
+    ).padStart(2, "0");
 
     return y + "-" + m + "-" + day;
 }
@@ -146,24 +155,35 @@ function handleResponse(response, body) {
             : 0;
 
     log("HTTP Status: " + status);
-    log("Response: " + shortText(body, 500));
+    log(
+        "Response: " +
+        shortText(body, 500)
+    );
 
+    // HTTP 鉴权错误
     if (
         status === 401 ||
         status === 403
     ) {
-        authExpired("HTTP " + status);
+        authExpired(
+            "HTTP " + status
+        );
+
         $done();
         return;
     }
 
+    // HTTP 异常
     if (
         status < 200 ||
         status >= 300
     ) {
         notify(
             "自动签到请求异常 ❌",
-            "HTTP " + status + "\n" + shortText(body)
+            "HTTP " +
+            status +
+            "\n" +
+            shortText(body)
         );
 
         $done();
@@ -175,13 +195,15 @@ function handleResponse(response, body) {
     if (!json) {
         notify(
             "自动签到返回异常 ❌",
-            "服务器返回内容无法解析\n" + shortText(body)
+            "服务器返回内容无法解析\n" +
+            shortText(body)
         );
 
         $done();
         return;
     }
 
+    // Vae+ 返回失败
     if (json.state === false) {
         const message =
             json.errMsg ||
@@ -233,7 +255,9 @@ function handleResponse(response, body) {
     const signed =
         signRecord.signToday === true ||
         signRecord.signToday === 1 ||
-        String(signRecord.signToday).toLowerCase() === "true";
+        String(
+            signRecord.signToday
+        ).toLowerCase() === "true";
 
     const continuity =
         signRecord.continuity !== undefined
@@ -245,36 +269,57 @@ function handleResponse(response, body) {
             ? signRecord.totalCount
             : "未知";
 
+    // 今日仍未签到
     if (!signed) {
         notify(
             "今日未签到 ⚠️",
-            "连续签到：" + continuity + "天\n" +
-            "累计签到：" + total + "天"
+            "连续签到：" +
+            continuity +
+            "天\n" +
+            "累计签到：" +
+            total +
+            "天"
         );
 
-        log("服务器返回 signToday=false");
+        log(
+            "服务器返回 signToday=false"
+        );
 
         $done();
         return;
     }
 
-    const today = getTodayString();
+    // ========================================
+    // 判断本次是否属于当天重复执行
+    // ========================================
+
+    const today =
+        getTodayString();
 
     const lastDate =
-        $persistentStore.read(LAST_DATE_KEY) || "";
+        $persistentStore.read(
+            LAST_DATE_KEY
+        ) || "";
 
     const lastTotal =
-        $persistentStore.read(LAST_TOTAL_KEY) || "";
+        $persistentStore.read(
+            LAST_TOTAL_KEY
+        ) || "";
 
     const isRepeated =
         lastDate === today &&
         String(lastTotal) === String(total);
 
     if (isRepeated) {
+        // 今天已经确认过签到
         notify(
-            "今日已签到 🎉",
-            "连续签到：" + continuity + "天\n" +
-            "累计签到：" + total + "天"
+            "今日已签到，请勿重复签到 🎉",
+            "连续签到：" +
+            continuity +
+            "天\n" +
+            "累计签到：" +
+            total +
+            "天"
         );
 
         log(
@@ -285,6 +330,7 @@ function handleResponse(response, body) {
             " 天"
         );
     } else {
+        // 当天第一次确认签到成功
         $persistentStore.write(
             today,
             LAST_DATE_KEY
@@ -297,8 +343,12 @@ function handleResponse(response, body) {
 
         notify(
             "签到成功 ✅",
-            "连续签到：" + continuity + "天\n" +
-            "累计签到：" + total + "天"
+            "连续签到：" +
+            continuity +
+            "天\n" +
+            "累计签到：" +
+            total +
+            "天"
         );
 
         log(
@@ -315,7 +365,9 @@ function handleResponse(response, body) {
 
 function start() {
     const stored =
-        $persistentStore.read(STORE_KEY);
+        $persistentStore.read(
+            STORE_KEY
+        );
 
     if (!stored) {
         notify(
@@ -350,6 +402,7 @@ function start() {
 
     const options = {
         url: request.url,
+
         headers: cleanHeaders(
             request.headers || {}
         )
@@ -365,15 +418,23 @@ function start() {
     }
 
     log("开始执行自动签到");
-    log("Method: " + method);
-    log("URL: " + request.url);
+    log(
+        "Method: " + method
+    );
+    log(
+        "URL: " + request.url
+    );
     log(
         "Action: " +
         (request.action || "unknown")
     );
 
     const callback =
-        function(error, response, body) {
+        function (
+            error,
+            response,
+            body
+        ) {
             if (error) {
                 log(
                     "网络请求失败：" +
@@ -412,8 +473,7 @@ try {
     start();
 } catch (e) {
     log(
-        "脚本异常：" +
-        e
+        "脚本异常：" + e
     );
 
     notify(
