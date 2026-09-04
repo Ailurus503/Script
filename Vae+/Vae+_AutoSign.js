@@ -313,7 +313,7 @@ function handleResponse(response, body) {
     if (isRepeated) {
         // 今天已经确认过签到
         notify(
-            "今日已签到，请勿重复签到 🎉",
+            "今日已签到🎉",
             "连续签到：" +
             continuity +
             "天\n" +
