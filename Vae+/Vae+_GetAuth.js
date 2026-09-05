@@ -1,223 +1,245 @@
 /*
-Vae+ Auth Capture Final
-Loon
+ * Vae+ 签到请求捕获脚本
+ * Vae_GetAuth.js
+ *
+ * 类型：http-response
+ *
+ * URL 正则：
+ * ^https:\/\/api1\.starfans\.com\/auth\/
+ *
+ * 必须开启：
+ * - 需要响应 Body
+ *
+ * 功能：
+ * 1. 捕获 /USER_HOME/getRecord.json
+ *    保存为 VAE_STATUS_REQUEST
+ *
+ * 2. 捕获 /USER_HOME/getRecordByMonth.json
+ *    保存为 VAE_SIGN_REQUEST
+ *
+ * 自动签到脚本会使用这两个请求模板。
+ */
 
-保存:
-VAE_SIGN_REQUEST
-VAE_SIGN_AUTH
-*/
+const STATUS_KEY = "VAE_STATUS_REQUEST";
+const SIGN_KEY = "VAE_SIGN_REQUEST";
 
-
-const REQUEST_KEY = "VAE_SIGN_REQUEST";
-const AUTH_KEY = "VAE_SIGN_AUTH";
-
-function log(t){
-    console.log("[Vae+] " + t);
+function log(msg) {
+    console.log("[Vae+ Auth] " + msg);
 }
 
+function notify(title, subtitle, body) {
+    if (typeof $notification !== "undefined") {
+        $notification.post(
+            title || "",
+            subtitle || "",
+            body || ""
+        );
+    }
+}
 
-function parseJSON(t){
-    try{
-        return JSON.parse(t);
-    }catch(e){
+function parseJSON(text) {
+    if (!text) return null;
+
+    try {
+        return JSON.parse(text);
+    } catch (e) {
         return null;
     }
 }
 
+function cleanHeaders(headers) {
+    const result = {};
 
-function parseForm(str){
+    if (!headers) return result;
 
-    let obj={};
+    Object.keys(headers).forEach(function (key) {
+        const lower = key.toLowerCase();
 
-    if(!str) return obj;
-
-
-    str.split("&").forEach(i=>{
-
-        let p=i.indexOf("=");
-
-        if(p>0){
-
-            obj[
-                decodeURIComponent(i.slice(0,p))
-            ] =
-            decodeURIComponent(
-                i.slice(p+1)
-            );
-
+        // 这些 Header 由 Loon / 网络栈重新生成
+        if (
+            lower === "content-length" ||
+            lower === "host" ||
+            lower === "connection" ||
+            lower === "accept-encoding"
+        ) {
+            return;
         }
 
+        result[key] = headers[key];
     });
 
-    return obj;
+    return result;
 }
 
+function getResponseObject() {
+    if (
+        typeof $response === "undefined" ||
+        !$response ||
+        !$response.body
+    ) {
+        return null;
+    }
 
-
-function save(key,data){
-
-    $persistentStore.write(
-        JSON.stringify(data),
-        key
-    );
-
+    return parseJSON($response.body);
 }
 
+function getRequestVar(responseObject) {
+    if (!responseObject) return "";
 
-
-try{
-
-
-    if(!$response.body){
-        $done({});
-        return;
+    if (typeof responseObject.requestVar === "string") {
+        return responseObject.requestVar;
     }
 
+    return "";
+}
 
-    let res =
-    parseJSON(
-        $response.body
-    );
+function detectAction(requestVar) {
+    if (!requestVar) return null;
 
-
-    if(!res){
-        $done({});
-        return;
+    if (
+        requestVar.indexOf(
+            "/USER_HOME/getRecordByMonth.json"
+        ) !== -1
+    ) {
+        return "sign";
     }
 
-
-    let requestVar =
-    res.requestVar || "";
-
-
-    if(
-        !requestVar ||
-        !requestVar.includes(
+    if (
+        requestVar.indexOf(
             "/USER_HOME/getRecord.json"
-        )
-    ){
-
-        $done({});
-        return;
+        ) !== -1
+    ) {
+        return "status";
     }
 
+    return null;
+}
 
+function buildRequestTemplate(action) {
+    const request = $request || {};
 
-    let url =
-    $request.url || "";
+    return {
+        version: 2,
 
+        action:
+            action === "sign"
+                ? "/USER_HOME/getRecordByMonth.json"
+                : "/USER_HOME/getRecord.json",
 
-    let q="";
-
-
-    if(url.includes("?")){
-
-        let query =
-        url.split("?")[1];
-
-        let params =
-        parseForm(query);
-
-
-        q=params.q || "";
-
-    }
-
-
-
-    if(!q && $request.body){
-
-        let body =
-        parseForm(
-            $request.body
-        );
-
-        q=body.q || "";
-
-    }
-
-
-
-    let requestData={
-
-        url:url,
+        url: request.url || "",
 
         method:
-        $request.method || "POST",
+            (request.method || "POST").toUpperCase(),
 
-
-        headers:
-        $request.headers || {},
-
+        headers: cleanHeaders(request.headers || {}),
 
         body:
-        $request.body || "",
+            typeof request.body === "string"
+                ? request.body
+                : "",
 
-
-        q:q,
-
-
-        action:
-        "/USER_HOME/getRecord.json",
-
-
-        updateTime:
-        new Date().toISOString()
-
+        updateTime: Date.now()
     };
-
-
-
-    let authData={
-
-        action:
-        "/USER_HOME/getRecord.json",
-
-
-        q:q,
-
-
-        requestVar:requestVar,
-
-
-        updateTime:
-        new Date().toISOString()
-
-    };
-
-
-
-    save(
-        REQUEST_KEY,
-        requestData
-    );
-
-
-    save(
-        AUTH_KEY,
-        authData
-    );
-
-
-    log(
-        "签到请求已更新"
-    );
-
-
-    $notification.post(
-        "Vae+",
-        "签到授权更新",
-        "签到请求已保存"
-    );
-
-
-}catch(e){
-
-    log(
-        "错误:"+e
-    );
-
 }
 
+function saveRequest(key, data) {
+    try {
+        const text = JSON.stringify(data);
 
-$done({});
+        const ok = $persistentStore.write(
+            text,
+            key
+        );
+
+        return ok !== false;
+    } catch (e) {
+        log("保存失败：" + e);
+        return false;
+    }
+}
+
+function main() {
+    try {
+        const responseObject = getResponseObject();
+
+        if (!responseObject) {
+            log("响应不是有效 JSON，跳过");
+            return;
+        }
+
+        const requestVar =
+            getRequestVar(responseObject);
+
+        if (!requestVar) {
+            log("响应中没有 requestVar，跳过");
+            return;
+        }
+
+        const type = detectAction(requestVar);
+
+        if (!type) {
+            return;
+        }
+
+        if (type === "status") {
+            const data =
+                buildRequestTemplate("status");
+
+            if (!data.url || !data.body) {
+                log("状态查询请求数据不完整");
+                return;
+            }
+
+            if (saveRequest(STATUS_KEY, data)) {
+                log(
+                    "已保存状态查询请求：" +
+                    data.action
+                );
+
+                log(
+                    "Body length: " +
+                    data.body.length
+                );
+            }
+
+            return;
+        }
+
+        if (type === "sign") {
+            const data =
+                buildRequestTemplate("sign");
+
+            if (!data.url || !data.body) {
+                log("签到请求数据不完整");
+                return;
+            }
+
+            if (saveRequest(SIGN_KEY, data)) {
+                log(
+                    "已保存签到请求：" +
+                    data.action
+                );
+
+                log(
+                    "Body length: " +
+                    data.body.length
+                );
+
+                notify(
+                    "Vae+ 签到授权更新",
+                    "签到请求已保存",
+                    "getRecordByMonth 请求已完成持久化"
+                );
+            }
+
+            return;
+        }
+
+    } catch (e) {
+        log("脚本异常：" + e);
+    }
+}
+
+main();
+
+$done();
