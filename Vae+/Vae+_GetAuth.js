@@ -1,40 +1,41 @@
 /*
- * Vae+ 签到请求捕获脚本
+ * Vae+ 请求捕获 / 持久化
  * Vae_GetAuth.js
  *
- * 类型：http-response
+ * Loon 类型：
+ * http-response
  *
- * URL 正则：
+ * 表达式：
  * ^https:\/\/api1\.starfans\.com\/auth\/
  *
- * 必须开启：
- * - 需要响应 Body
+ * 设置：
+ * 响应 Body：开启
+ * 二进制 Body：关闭
  *
- * 功能：
- * 1. 捕获 /USER_HOME/getRecord.json
- *    保存为 VAE_STATUS_REQUEST
+ * 保存：
+ * VAE_STATUS_REQUEST
+ *   = /USER_HOME/getRecord.json
  *
- * 2. 捕获 /USER_HOME/getRecordByMonth.json
- *    保存为 VAE_SIGN_REQUEST
- *
- * 自动签到脚本会使用这两个请求模板。
+ * VAE_SIGN_REQUEST
+ *   = /USER_HOME/getRecordByMonth.json
  */
 
 const STATUS_KEY = "VAE_STATUS_REQUEST";
-const SIGN_KEY = "VAE_SIGN_REQUEST";
+const SIGN_KEY   = "VAE_SIGN_REQUEST";
 
-function log(msg) {
-    console.log("[Vae+ Auth] " + msg);
+function log(message) {
+    console.log("[Vae+ Auth] " + message);
 }
 
-function notify(title, subtitle, body) {
-    if (typeof $notification !== "undefined") {
-        $notification.post(
-            title || "",
-            subtitle || "",
-            body || ""
-        );
-    }
+function finish() {
+    /*
+     * 关键：
+     * 原样返回服务器响应。
+     * 不修改 status / headers / body。
+     */
+    $done({
+        response: $response
+    });
 }
 
 function parseJSON(text) {
@@ -50,12 +51,19 @@ function parseJSON(text) {
 function cleanHeaders(headers) {
     const result = {};
 
-    if (!headers) return result;
+    if (!headers) {
+        return result;
+    }
 
     Object.keys(headers).forEach(function (key) {
+
         const lower = key.toLowerCase();
 
-        // 这些 Header 由 Loon / 网络栈重新生成
+        /*
+         * 重放请求时这些 Header
+         * 交给 Loon / 网络栈重新生成。
+         */
+
         if (
             lower === "content-length" ||
             lower === "host" ||
@@ -71,164 +79,190 @@ function cleanHeaders(headers) {
     return result;
 }
 
-function getResponseObject() {
+function saveTemplate(key, action) {
+
+    if (
+        typeof $request === "undefined" ||
+        !$request
+    ) {
+        log("无法读取 $request");
+        return false;
+    }
+
+    const body =
+        typeof $request.body === "string"
+            ? $request.body
+            : "";
+
+    if (!body) {
+        log(
+            action +
+            "：请求 Body 为空，未保存"
+        );
+
+        return false;
+    }
+
+    const template = {
+
+        version: 3,
+
+        action: action,
+
+        url: $request.url || "",
+
+        method:
+            ($request.method || "POST")
+                .toUpperCase(),
+
+        headers:
+            cleanHeaders(
+                $request.headers || {}
+            ),
+
+        body: body,
+
+        updateTime: Date.now()
+    };
+
+    try {
+
+        const success =
+            $persistentStore.write(
+                JSON.stringify(template),
+                key
+            );
+
+        if (success === false) {
+            log(
+                action +
+                "：持久化失败"
+            );
+
+            return false;
+        }
+
+        log(
+            "已保存：" +
+            action
+        );
+
+        log(
+            "Body length: " +
+            body.length
+        );
+
+        return true;
+
+    } catch (e) {
+
+        log(
+            "保存异常：" +
+            String(e)
+        );
+
+        return false;
+    }
+}
+
+function getRequestVar() {
+
     if (
         typeof $response === "undefined" ||
         !$response ||
-        !$response.body
+        typeof $response.body !== "string"
     ) {
-        return null;
+        return "";
     }
 
-    return parseJSON($response.body);
-}
+    const json =
+        parseJSON($response.body);
 
-function getRequestVar(responseObject) {
-    if (!responseObject) return "";
+    if (!json) {
+        return "";
+    }
 
-    if (typeof responseObject.requestVar === "string") {
-        return responseObject.requestVar;
+    /*
+     * Vae+ /auth/ 响应中已经验证
+     * requestVar 会暴露实际内部 Action。
+     */
+
+    if (
+        typeof json.requestVar === "string"
+    ) {
+        return json.requestVar;
     }
 
     return "";
 }
 
-function detectAction(requestVar) {
-    if (!requestVar) return null;
-
-    if (
-        requestVar.indexOf(
-            "/USER_HOME/getRecordByMonth.json"
-        ) !== -1
-    ) {
-        return "sign";
-    }
-
-    if (
-        requestVar.indexOf(
-            "/USER_HOME/getRecord.json"
-        ) !== -1
-    ) {
-        return "status";
-    }
-
-    return null;
-}
-
-function buildRequestTemplate(action) {
-    const request = $request || {};
-
-    return {
-        version: 2,
-
-        action:
-            action === "sign"
-                ? "/USER_HOME/getRecordByMonth.json"
-                : "/USER_HOME/getRecord.json",
-
-        url: request.url || "",
-
-        method:
-            (request.method || "POST").toUpperCase(),
-
-        headers: cleanHeaders(request.headers || {}),
-
-        body:
-            typeof request.body === "string"
-                ? request.body
-                : "",
-
-        updateTime: Date.now()
-    };
-}
-
-function saveRequest(key, data) {
-    try {
-        const text = JSON.stringify(data);
-
-        const ok = $persistentStore.write(
-            text,
-            key
-        );
-
-        return ok !== false;
-    } catch (e) {
-        log("保存失败：" + e);
-        return false;
-    }
-}
-
 function main() {
-    try {
-        const responseObject = getResponseObject();
 
-        if (!responseObject) {
-            log("响应不是有效 JSON，跳过");
-            return;
-        }
+    try {
 
         const requestVar =
-            getRequestVar(responseObject);
+            getRequestVar();
+
+        /*
+         * 非目标 /auth/ 请求：
+         * 什么都不做。
+         */
 
         if (!requestVar) {
-            log("响应中没有 requestVar，跳过");
             return;
         }
 
-        const type = detectAction(requestVar);
+        /*
+         * 注意：
+         * 必须先判断 getRecordByMonth。
+         *
+         * 因为它的名字包含 getRecord，
+         * 如果反过来判断可能误分类。
+         */
 
-        if (!type) {
-            return;
-        }
+        if (
+            requestVar.indexOf(
+                "/USER_HOME/getRecordByMonth.json"
+            ) !== -1
+        ) {
 
-        if (type === "status") {
-            const data =
-                buildRequestTemplate("status");
-
-            if (!data.url || !data.body) {
-                log("状态查询请求数据不完整");
-                return;
-            }
-
-            if (saveRequest(STATUS_KEY, data)) {
-                log(
-                    "已保存状态查询请求：" +
-                    data.action
+            const saved =
+                saveTemplate(
+                    SIGN_KEY,
+                    "/USER_HOME/getRecordByMonth.json"
                 );
 
-                log(
-                    "Body length: " +
-                    data.body.length
-                );
-            }
-
-            return;
-        }
-
-        if (type === "sign") {
-            const data =
-                buildRequestTemplate("sign");
-
-            if (!data.url || !data.body) {
-                log("签到请求数据不完整");
-                return;
-            }
-
-            if (saveRequest(SIGN_KEY, data)) {
-                log(
-                    "已保存签到请求：" +
-                    data.action
-                );
+            if (saved) {
 
                 log(
-                    "Body length: " +
-                    data.body.length
+                    "签到请求模板更新成功"
                 );
 
-                notify(
-                    "Vae+ 签到授权更新",
+                $notification.post(
+                    "Vae+ 授权更新",
                     "签到请求已保存",
-                    "getRecordByMonth 请求已完成持久化"
+                    "getRecordByMonth"
+                );
+            }
+
+            return;
+        }
+
+        if (
+            requestVar.indexOf(
+                "/USER_HOME/getRecord.json"
+            ) !== -1
+        ) {
+
+            const saved =
+                saveTemplate(
+                    STATUS_KEY,
+                    "/USER_HOME/getRecord.json"
+                );
+
+            if (saved) {
+                log(
+                    "状态查询模板更新成功"
                 );
             }
 
@@ -236,10 +270,38 @@ function main() {
         }
 
     } catch (e) {
-        log("脚本异常：" + e);
+
+        /*
+         * 捕获脚本自身即使报错，
+         * 也不能影响 App 原始响应。
+         */
+
+        log(
+            "捕获异常：" +
+            String(e)
+        );
     }
 }
 
-main();
 
-$done();
+/*
+ * 无论上面发生什么，
+ * 最终都执行 finish()，
+ * 将原响应交还给 Loon。
+ */
+
+try {
+
+    main();
+
+} catch (e) {
+
+    log(
+        "主程序异常：" +
+        String(e)
+    );
+
+} finally {
+
+    finish();
+}
