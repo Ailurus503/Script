@@ -23,8 +23,6 @@
 const STATUS_KEY = "VAE_STATUS_REQUEST";
 const SIGN_KEY = "VAE_SIGN_REQUEST";
 
-const OLD_STATUS_KEY = "VAE_SIGN_REQUEST";
-
 const LAST_DATE_KEY = "VAE_LAST_SIGN_DATE";
 const LAST_TOTAL_KEY = "VAE_LAST_SIGN_TOTAL";
 
@@ -131,13 +129,14 @@ function request(template, callback) {
     const options =
         buildOptions(template);
 
-    log("Request Action: " +
-        (template.action || "Unknown"));
+    log(
+        "Request Action: " +
+        (template.action || "Unknown")
+    );
 
     log("Method: " + method);
 
     if (method === "GET") {
-
         delete options.body;
 
         $httpClient.get(
@@ -223,16 +222,16 @@ function findSignSuccessAnimation(obj) {
         return false;
     }
 
-    if (
-        obj.title === "签到成功"
-    ) {
+    if (obj.title === "签到成功") {
         return true;
     }
 
     if (Array.isArray(obj)) {
         for (let i = 0; i < obj.length; i++) {
             if (
-                findSignSuccessAnimation(obj[i])
+                findSignSuccessAnimation(
+                    obj[i]
+                )
             ) {
                 return true;
             }
@@ -251,7 +250,9 @@ function findSignSuccessAnimation(obj) {
             typeof value === "object"
         ) {
             if (
-                findSignSuccessAnimation(value)
+                findSignSuccessAnimation(
+                    value
+                )
             ) {
                 return true;
             }
@@ -283,7 +284,7 @@ function finish() {
 
 function fail(title, body) {
     notify(
-        "Vae+ 自动签到",
+        "Vae+ 每日签到",
         title,
         body
     );
@@ -518,7 +519,7 @@ function reportAlreadySigned(
 
     notify(
         "Vae+ 每日签到",
-        "今日已签到，请勿重复签到 🎉",
+        "今日已签到🎉",
         "连续签到：" +
             continuity +
             "天\n" +
@@ -558,7 +559,7 @@ function reportSuccess(
 
     notify(
         "Vae+ 每日签到",
-        "签到成功 🎉",
+        "签到成功🎉",
         "连续签到：" +
             continuity +
             "天\n" +
@@ -618,7 +619,7 @@ function start() {
             }
 
             /*
-             * 已经签到
+             * 今天已经签到
              */
 
             if (
@@ -636,8 +637,8 @@ function start() {
             }
 
             /*
-             * 未签到
-             * 开始调用 getRecordByMonth
+             * 今天尚未签到：
+             * 调用 getRecordByMonth
              */
 
             performSign(
@@ -655,9 +656,12 @@ function start() {
                     }
 
                     /*
-                     * 再次查询服务器状态
+                     * 签到请求执行以后，
+                     * 再次调用 getRecord。
                      *
-                     * 不直接相信签到接口返回。
+                     * 最终必须由服务器
+                     * signToday=true
+                     * 确认签到成功。
                      */
 
                     log(
@@ -681,6 +685,10 @@ function start() {
                                 return;
                             }
 
+                            /*
+                             * 最终确认成功
+                             */
+
                             if (
                                 finalRecord.signToday
                                 === true
@@ -697,10 +705,10 @@ function start() {
                             }
 
                             /*
-                             * 请求成功，
+                             * 请求虽然执行成功，
                              * 但服务器仍然显示未签到。
                              *
-                             * 绝不误报签到成功。
+                             * 此时绝不误报签到成功。
                              */
 
                             log(
@@ -708,7 +716,7 @@ function start() {
                             );
 
                             fail(
-                                "今日未签到 ⚠️",
+                                "今日未签到⚠️",
                                 "签到请求已执行，但服务器最终仍返回未签到。\n" +
                                 "累计签到：" +
                                 Number(
