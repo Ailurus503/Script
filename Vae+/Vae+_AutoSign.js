@@ -1,49 +1,81 @@
 /*
- * ========================================
- * Vae+ 自动签到 Final v1.2
- * 适用：Loon
- * ========================================
+ * Vae+ 自动签到
+ * Vae_AutoSign.js
  *
- * 读取：
- * VAE_SIGN_REQUEST
+ * 流程：
  *
- * 本地状态：
- * VAE_LAST_SIGN_DATE
- * VAE_LAST_SIGN_TOTAL
+ * 1. getRecord
+ *    查询今日签到状态
  *
- * 功能：
- * - 自动重放签到请求
- * - 判断今日签到状态
- * - 首次成功：签到成功 ✅
- * - 当天重复执行：今日已签到，请勿重复签到 🎉
- * - 显示连续签到 / 累计签到
- * - 鉴权失效提醒
- * - 网络及服务器异常提醒
+ * 2. signToday == true
+ *    → 今日已签到
+ *
+ * 3. signToday == false
+ *    → 请求 getRecordByMonth
+ *
+ * 4. 再请求 getRecord
+ *    → 最终确认签到状态
+ *
+ * 只有最终 signToday == true
+ * 才会报告签到成功。
  */
 
-const STORE_KEY = "VAE_SIGN_REQUEST";
+const STATUS_KEY = "VAE_STATUS_REQUEST";
+const SIGN_KEY = "VAE_SIGN_REQUEST";
+
+const OLD_STATUS_KEY = "VAE_SIGN_REQUEST";
+
 const LAST_DATE_KEY = "VAE_LAST_SIGN_DATE";
 const LAST_TOTAL_KEY = "VAE_LAST_SIGN_TOTAL";
 
-function log(message) {
-    console.log("[Vae+ AutoSign] " + message);
+function log(msg) {
+    console.log("[Vae+ AutoSign] " + msg);
 }
 
-function notify(subtitle, message) {
-    try {
-        $notification.post(
-            "Vae+",
-            subtitle || "",
-            message || ""
-        );
-    } catch (e) {
-        log("通知失败：" + e);
-    }
+function notify(title, subtitle, body) {
+    $notification.post(
+        title || "",
+        subtitle || "",
+        body || ""
+    );
 }
 
 function parseJSON(text) {
+    if (!text) return null;
+
     try {
         return JSON.parse(text);
+    } catch (e) {
+        return null;
+    }
+}
+
+function readStore(key) {
+    try {
+        return $persistentStore.read(key);
+    } catch (e) {
+        return null;
+    }
+}
+
+function writeStore(key, value) {
+    try {
+        return $persistentStore.write(
+            String(value),
+            key
+        );
+    } catch (e) {
+        return false;
+    }
+}
+
+function loadRequest(key) {
+    const raw = readStore(key);
+
+    if (!raw) return null;
+
+    try {
+        return JSON.parse(raw);
     } catch (e) {
         return null;
     }
@@ -52,37 +84,100 @@ function parseJSON(text) {
 function cleanHeaders(headers) {
     const result = {};
 
-    if (!headers) {
-        return result;
-    }
+    if (!headers) return result;
 
-    for (const key in headers) {
+    Object.keys(headers).forEach(function (key) {
         const lower = key.toLowerCase();
 
-        // 交给 Loon 自动生成，避免重放旧值
         if (
             lower === "content-length" ||
             lower === "host" ||
             lower === "connection" ||
             lower === "accept-encoding"
         ) {
-            continue;
+            return;
         }
 
         result[key] = headers[key];
-    }
+    });
 
     return result;
 }
 
-function findSignRecord(obj, depth) {
-    depth = depth || 0;
+function buildOptions(template) {
+    return {
+        url: template.url,
 
-    if (!obj || depth > 10) {
-        return null;
+        headers: cleanHeaders(
+            template.headers || {}
+        ),
+
+        body: template.body || ""
+    };
+}
+
+function request(template, callback) {
+    if (!template) {
+        callback(
+            new Error("请求模板不存在")
+        );
+        return;
     }
 
-    if (typeof obj !== "object") {
+    const method =
+        (template.method || "POST")
+            .toUpperCase();
+
+    const options =
+        buildOptions(template);
+
+    log("Request Action: " +
+        (template.action || "Unknown"));
+
+    log("Method: " + method);
+
+    if (method === "GET") {
+
+        delete options.body;
+
+        $httpClient.get(
+            options,
+            function (error, response, data) {
+                callback(
+                    error,
+                    response,
+                    data
+                );
+            }
+        );
+
+        return;
+    }
+
+    $httpClient.post(
+        options,
+        function (error, response, data) {
+            callback(
+                error,
+                response,
+                data
+            );
+        }
+    );
+}
+
+function getStatusCode(response) {
+    if (!response) return 0;
+
+    return Number(
+        response.status ||
+        response.statusCode ||
+        0
+    );
+}
+
+function findSignRecord(obj) {
+    if (!obj || typeof obj !== "object") {
         return null;
     }
 
@@ -93,393 +188,541 @@ function findSignRecord(obj, depth) {
         return obj.signRecord;
     }
 
-    for (const key in obj) {
-        const value = obj[key];
+    if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+            const result =
+                findSignRecord(obj[i]);
+
+            if (result) return result;
+        }
+
+        return null;
+    }
+
+    const keys = Object.keys(obj);
+
+    for (let i = 0; i < keys.length; i++) {
+        const value = obj[keys[i]];
 
         if (
             value &&
             typeof value === "object"
         ) {
-            const found = findSignRecord(
-                value,
-                depth + 1
-            );
+            const result =
+                findSignRecord(value);
 
-            if (found) {
-                return found;
-            }
+            if (result) return result;
         }
     }
 
     return null;
 }
 
-function shortText(text, maxLength) {
-    text = String(text || "");
-    maxLength = maxLength || 160;
-
-    if (text.length <= maxLength) {
-        return text;
+function findSignSuccessAnimation(obj) {
+    if (!obj || typeof obj !== "object") {
+        return false;
     }
 
-    return text.substring(0, maxLength) + "...";
+    if (
+        obj.title === "签到成功"
+    ) {
+        return true;
+    }
+
+    if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+            if (
+                findSignSuccessAnimation(obj[i])
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    const keys = Object.keys(obj);
+
+    for (let i = 0; i < keys.length; i++) {
+        const value = obj[keys[i]];
+
+        if (
+            value &&
+            typeof value === "object"
+        ) {
+            if (
+                findSignSuccessAnimation(value)
+            ) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 function getTodayString() {
     const d = new Date();
 
     const y = d.getFullYear();
-    const m = String(
-        d.getMonth() + 1
-    ).padStart(2, "0");
 
-    const day = String(
-        d.getDate()
-    ).padStart(2, "0");
+    const m =
+        String(d.getMonth() + 1)
+            .padStart(2, "0");
+
+    const day =
+        String(d.getDate())
+            .padStart(2, "0");
 
     return y + "-" + m + "-" + day;
 }
 
-function authExpired(reason) {
+function finish() {
+    $done();
+}
+
+function fail(title, body) {
     notify(
-        "签到鉴权失效 ⚠️",
-        (reason || "服务器拒绝了签到请求") +
-        "\n请打开一次 Vae+ → 发现 → 每日签到，自动刷新鉴权。"
+        "Vae+ 自动签到",
+        title,
+        body
+    );
+
+    finish();
+}
+
+function parseServerResponse(
+    error,
+    response,
+    data
+) {
+    if (error) {
+        return {
+            ok: false,
+            reason:
+                "网络错误：" +
+                String(error)
+        };
+    }
+
+    const statusCode =
+        getStatusCode(response);
+
+    log(
+        "HTTP Status: " +
+        statusCode
+    );
+
+    if (
+        statusCode === 401 ||
+        statusCode === 403
+    ) {
+        return {
+            ok: false,
+            authExpired: true,
+            reason:
+                "HTTP " +
+                statusCode +
+                "，授权可能已失效"
+        };
+    }
+
+    if (
+        statusCode < 200 ||
+        statusCode >= 300
+    ) {
+        return {
+            ok: false,
+            reason:
+                "HTTP " +
+                statusCode
+        };
+    }
+
+    const json =
+        parseJSON(data);
+
+    if (!json) {
+        return {
+            ok: false,
+            reason:
+                "服务器响应不是有效 JSON"
+        };
+    }
+
+    if (json.state === false) {
+        return {
+            ok: false,
+            reason:
+                json.errMsg ||
+                json.message ||
+                "服务器返回 state=false"
+        };
+    }
+
+    return {
+        ok: true,
+        json: json
+    };
+}
+
+function queryStatus(
+    statusRequest,
+    callback
+) {
+    log("查询签到状态");
+
+    request(
+        statusRequest,
+        function (
+            error,
+            response,
+            data
+        ) {
+            const result =
+                parseServerResponse(
+                    error,
+                    response,
+                    data
+                );
+
+            if (!result.ok) {
+                callback(
+                    result,
+                    null
+                );
+
+                return;
+            }
+
+            const signRecord =
+                findSignRecord(
+                    result.json
+                );
+
+            if (!signRecord) {
+                callback(
+                    {
+                        ok: false,
+                        reason:
+                            "未找到 signRecord"
+                    },
+                    null
+                );
+
+                return;
+            }
+
+            log(
+                "signToday=" +
+                signRecord.signToday
+            );
+
+            log(
+                "continuity=" +
+                signRecord.continuity
+            );
+
+            log(
+                "totalCount=" +
+                signRecord.totalCount
+            );
+
+            callback(
+                {
+                    ok: true,
+                    json: result.json
+                },
+                signRecord
+            );
+        }
     );
 }
 
-function handleResponse(response, body) {
-    const status =
-        response && response.status
-            ? Number(response.status)
-            : 0;
-
-    log("HTTP Status: " + status);
+function performSign(
+    signRequest,
+    callback
+) {
     log(
-        "Response: " +
-        shortText(body, 500)
+        "今日未签到，开始执行签到请求"
     );
 
-    // HTTP 鉴权错误
-    if (
-        status === 401 ||
-        status === 403
-    ) {
-        authExpired(
-            "HTTP " + status
-        );
+    request(
+        signRequest,
+        function (
+            error,
+            response,
+            data
+        ) {
+            const result =
+                parseServerResponse(
+                    error,
+                    response,
+                    data
+                );
 
-        $done();
-        return;
-    }
+            if (!result.ok) {
+                callback(result);
+                return;
+            }
 
-    // HTTP 异常
-    if (
-        status < 200 ||
-        status >= 300
-    ) {
-        notify(
-            "自动签到请求异常 ❌",
-            "HTTP " +
-            status +
-            "\n" +
-            shortText(body)
-        );
+            const animationSuccess =
+                findSignSuccessAnimation(
+                    result.json
+                );
 
-        $done();
-        return;
-    }
+            if (animationSuccess) {
+                log(
+                    "签到接口返回：签到成功"
+                );
+            } else {
+                log(
+                    "签到请求已完成，等待最终状态确认"
+                );
+            }
 
-    const json = parseJSON(body);
-
-    if (!json) {
-        notify(
-            "自动签到返回异常 ❌",
-            "服务器返回内容无法解析\n" +
-            shortText(body)
-        );
-
-        $done();
-        return;
-    }
-
-    // Vae+ 返回失败
-    if (json.state === false) {
-        const message =
-            json.errMsg ||
-            json.message ||
-            json.msg ||
-            "服务器返回 state=false";
-
-        const lower =
-            String(message).toLowerCase();
-
-        const authError =
-            lower.includes("token") ||
-            lower.includes("auth") ||
-            lower.includes("login") ||
-            lower.includes("session") ||
-            lower.includes("expired") ||
-            lower.includes("invalid") ||
-            lower.includes("登录") ||
-            lower.includes("鉴权") ||
-            lower.includes("失效") ||
-            lower.includes("过期");
-
-        if (authError) {
-            authExpired(message);
-        } else {
-            notify(
-                "自动签到失败 ❌",
-                message
-            );
+            callback({
+                ok: true,
+                animationSuccess:
+                    animationSuccess
+            });
         }
+    );
+}
 
-        $done();
-        return;
-    }
-
-    const signRecord =
-        findSignRecord(json);
-
-    if (!signRecord) {
-        notify(
-            "签到请求已执行 ⚠️",
-            "服务器已接受请求，但没有找到签到状态。"
-        );
-
-        $done();
-        return;
-    }
-
-    const signed =
-        signRecord.signToday === true ||
-        signRecord.signToday === 1 ||
-        String(
-            signRecord.signToday
-        ).toLowerCase() === "true";
-
+function reportAlreadySigned(
+    signRecord
+) {
     const continuity =
-        signRecord.continuity !== undefined
-            ? signRecord.continuity
-            : "未知";
+        Number(
+            signRecord.continuity || 0
+        );
 
     const total =
-        signRecord.totalCount !== undefined
-            ? signRecord.totalCount
-            : "未知";
-
-    // 今日仍未签到
-    if (!signed) {
-        notify(
-            "今日未签到 ⚠️",
-            "连续签到：" +
-            continuity +
-            "天\n" +
-            "累计签到：" +
-            total +
-            "天"
+        Number(
+            signRecord.totalCount || 0
         );
-
-        log(
-            "服务器返回 signToday=false"
-        );
-
-        $done();
-        return;
-    }
-
-    // ========================================
-    // 判断本次是否属于当天重复执行
-    // ========================================
 
     const today =
         getTodayString();
 
-    const lastDate =
-        $persistentStore.read(
-            LAST_DATE_KEY
-        ) || "";
-
-    const lastTotal =
-        $persistentStore.read(
-            LAST_TOTAL_KEY
-        ) || "";
-
-    const isRepeated =
-        lastDate === today &&
-        String(lastTotal) === String(total);
-
-    if (isRepeated) {
-        // 今天已经确认过签到
-        notify(
-            "今日已签到🎉",
-            "连续签到：" +
-            continuity +
-            "天\n" +
-            "累计签到：" +
-            total +
-            "天"
-        );
-
-        log(
-            "今日已签到 | 连续 " +
-            continuity +
-            " 天 | 累计 " +
-            total +
-            " 天"
-        );
-    } else {
-        // 当天第一次确认签到成功
-        $persistentStore.write(
-            today,
-            LAST_DATE_KEY
-        );
-
-        $persistentStore.write(
-            String(total),
-            LAST_TOTAL_KEY
-        );
-
-        notify(
-            "签到成功 ✅",
-            "连续签到：" +
-            continuity +
-            "天\n" +
-            "累计签到：" +
-            total +
-            "天"
-        );
-
-        log(
-            "签到成功 | 连续 " +
-            continuity +
-            " 天 | 累计 " +
-            total +
-            " 天"
-        );
-    }
-
-    $done();
-}
-
-function start() {
-    const stored =
-        $persistentStore.read(
-            STORE_KEY
-        );
-
-    if (!stored) {
-        notify(
-            "无法自动签到 ⚠️",
-            "没有找到签到鉴权，请先打开一次 Vae+ → 发现 → 每日签到。"
-        );
-
-        $done();
-        return;
-    }
-
-    const request =
-        parseJSON(stored);
-
-    if (
-        !request ||
-        !request.url
-    ) {
-        notify(
-            "签到模板异常 ⚠️",
-            "持久化签到数据无法读取，请重新打开 Vae+ 刷新鉴权。"
-        );
-
-        $done();
-        return;
-    }
-
-    const method =
-        String(
-            request.method || "GET"
-        ).toUpperCase();
-
-    const options = {
-        url: request.url,
-
-        headers: cleanHeaders(
-            request.headers || {}
-        )
-    };
-
-    if (
-        method === "POST" ||
-        method === "PUT" ||
-        method === "PATCH"
-    ) {
-        options.body =
-            request.body || "";
-    }
-
-    log("开始执行自动签到");
-    log(
-        "Method: " + method
-    );
-    log(
-        "URL: " + request.url
-    );
-    log(
-        "Action: " +
-        (request.action || "unknown")
+    writeStore(
+        LAST_DATE_KEY,
+        today
     );
 
-    const callback =
-        function (
-            error,
-            response,
-            body
-        ) {
-            if (error) {
-                log(
-                    "网络请求失败：" +
-                    error
-                );
-
-                notify(
-                    "自动签到网络失败 ❌",
-                    String(error)
-                );
-
-                $done();
-                return;
-            }
-
-            handleResponse(
-                response,
-                body || ""
-            );
-        };
-
-    if (method === "POST") {
-        $httpClient.post(
-            options,
-            callback
-        );
-    } else {
-        $httpClient.get(
-            options,
-            callback
-        );
-    }
-}
-
-try {
-    start();
-} catch (e) {
-    log(
-        "脚本异常：" + e
+    writeStore(
+        LAST_TOTAL_KEY,
+        total
     );
 
     notify(
-        "自动签到脚本异常 ❌",
-        String(e)
+        "Vae+ 每日签到",
+        "今日已签到，请勿重复签到 🎉",
+        "连续签到：" +
+            continuity +
+            "天\n" +
+        "累计签到：" +
+            total +
+            "天"
     );
 
-    $done();
+    finish();
 }
+
+function reportSuccess(
+    signRecord
+) {
+    const continuity =
+        Number(
+            signRecord.continuity || 0
+        );
+
+    const total =
+        Number(
+            signRecord.totalCount || 0
+        );
+
+    const today =
+        getTodayString();
+
+    writeStore(
+        LAST_DATE_KEY,
+        today
+    );
+
+    writeStore(
+        LAST_TOTAL_KEY,
+        total
+    );
+
+    notify(
+        "Vae+ 每日签到",
+        "签到成功 🎉",
+        "连续签到：" +
+            continuity +
+            "天\n" +
+        "累计签到：" +
+            total +
+            "天"
+    );
+
+    finish();
+}
+
+function start() {
+    log("开始执行自动签到");
+
+    const statusRequest =
+        loadRequest(STATUS_KEY);
+
+    const signRequest =
+        loadRequest(SIGN_KEY);
+
+    if (!statusRequest) {
+        fail(
+            "缺少状态查询请求",
+            "请先打开 Vae+ 的「发现」页面，让鉴权脚本重新捕获请求。"
+        );
+
+        return;
+    }
+
+    if (!signRequest) {
+        fail(
+            "缺少签到请求",
+            "请进入一次「发现 → 每日签到」，让鉴权脚本捕获 getRecordByMonth 请求。"
+        );
+
+        return;
+    }
+
+    /*
+     * 第一步：
+     * 查询当前签到状态
+     */
+
+    queryStatus(
+        statusRequest,
+        function (
+            statusResult,
+            signRecord
+        ) {
+            if (!statusResult.ok) {
+                fail(
+                    "状态查询失败",
+                    statusResult.reason
+                );
+
+                return;
+            }
+
+            /*
+             * 已经签到
+             */
+
+            if (
+                signRecord.signToday === true
+            ) {
+                log(
+                    "服务器确认今日已经签到"
+                );
+
+                reportAlreadySigned(
+                    signRecord
+                );
+
+                return;
+            }
+
+            /*
+             * 未签到
+             * 开始调用 getRecordByMonth
+             */
+
+            performSign(
+                signRequest,
+                function (
+                    signResult
+                ) {
+                    if (!signResult.ok) {
+                        fail(
+                            "签到请求失败",
+                            signResult.reason
+                        );
+
+                        return;
+                    }
+
+                    /*
+                     * 再次查询服务器状态
+                     *
+                     * 不直接相信签到接口返回。
+                     */
+
+                    log(
+                        "签到请求完成，开始最终确认"
+                    );
+
+                    queryStatus(
+                        statusRequest,
+                        function (
+                            verifyResult,
+                            finalRecord
+                        ) {
+                            if (
+                                !verifyResult.ok
+                            ) {
+                                fail(
+                                    "签到状态确认失败",
+                                    verifyResult.reason
+                                );
+
+                                return;
+                            }
+
+                            if (
+                                finalRecord.signToday
+                                === true
+                            ) {
+                                log(
+                                    "服务器最终确认 signToday=true"
+                                );
+
+                                reportSuccess(
+                                    finalRecord
+                                );
+
+                                return;
+                            }
+
+                            /*
+                             * 请求成功，
+                             * 但服务器仍然显示未签到。
+                             *
+                             * 绝不误报签到成功。
+                             */
+
+                            log(
+                                "最终确认 signToday=false"
+                            );
+
+                            fail(
+                                "今日未签到 ⚠️",
+                                "签到请求已执行，但服务器最终仍返回未签到。\n" +
+                                "累计签到：" +
+                                Number(
+                                    finalRecord.totalCount ||
+                                    0
+                                ) +
+                                "天"
+                            );
+                        }
+                    );
+                }
+            );
+        }
+    );
+}
+
+start();
