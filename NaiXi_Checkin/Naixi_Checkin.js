@@ -4,6 +4,7 @@ Loon版
 */
 
 const DOMAIN = "https://forum.naixi.net";
+const HOME_PAGE = DOMAIN + "/forum.php?forumlist=1";
 const SIGN_PAGE = DOMAIN + "/plugin.php?id=k_misign:sign";
 const COOKIE_KEY = "NaixiCookie";
 
@@ -12,7 +13,7 @@ const cookie = $persistentStore.read(COOKIE_KEY);
 if (!cookie) {
     notify(
         "❌ 签到失败",
-        "未找到Cookie"
+        "未找到 Cookie"
     );
     $done();
 }
@@ -21,20 +22,28 @@ const headers = {
     "Cookie": cookie,
     "User-Agent":
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
-    "Referer": SIGN_PAGE
+    "Referer": DOMAIN + "/"
 };
 
 
-// GET请求
+// GET 请求
 function get(url) {
-    return new Promise(resolve => {
+    return new Promise((resolve, reject) => {
         $httpClient.get(
             {
                 url: url,
                 headers: headers
             },
             (err, res, data) => {
-                resolve(data || "");
+                if (err) {
+                    reject(err);
+                    return;
+                }
+
+                resolve({
+                    status: res ? res.status : 0,
+                    data: data || ""
+                });
             }
         );
     });
@@ -45,28 +54,43 @@ function get(url) {
 
     try {
 
-        // 获取签到页面
-        let page = await get(SIGN_PAGE);
+        console.log("[奶昔签到] 开始执行");
 
-        if (!page) {
+        // 1. 获取论坛首页
+        console.log("[奶昔签到] 获取论坛首页");
+
+        let homeResp = await get(HOME_PAGE);
+
+        if (!homeResp.data) {
             notify(
                 "❌ 签到失败",
-                "无法获取签到页面"
+                "无法获取论坛首页"
             );
-
             $done();
             return;
         }
 
 
-        // 判断今日是否已经签到
-        if (page.includes("已签到")) {
+        let home = homeResp.data;
 
-            let info = parseInfo(page);
+
+        // 2. 判断 Cookie 是否失效
+        // Discuz 登录后页面通常存在非 0 的 discuz_uid
+        let uidMatch = home.match(
+            /discuz_uid\s*=\s*['"](\d+)['"]/
+        );
+
+        if (
+            !uidMatch ||
+            !uidMatch[1] ||
+            uidMatch[1] === "0"
+        ) {
+
+            console.log("[奶昔签到] Cookie 可能已失效");
 
             notify(
-                "今日已签到 🎉",
-                buildMessage(info)
+                "❌ Cookie 已失效",
+                "请重新登录奶昔论坛并更新 Cookie"
             );
 
             $done();
@@ -74,16 +98,25 @@ function get(url) {
         }
 
 
-        // 获取 formhash
-        let match = page.match(
+        console.log(
+            "[奶昔签到] 登录状态正常"
+        );
+
+
+        // 3. 从论坛首页提取 formhash
+        let match = home.match(
             /formhash=([a-zA-Z0-9]+)/
         );
 
         if (!match) {
 
+            console.log(
+                "[奶昔签到] 获取 formhash 失败"
+            );
+
             notify(
                 "❌ 签到失败",
-                "获取formhash失败"
+                "登录正常，但获取 formhash 失败"
             );
 
             $done();
@@ -93,35 +126,97 @@ function get(url) {
 
         let formhash = match[1];
 
+        console.log(
+            "[奶昔签到] formhash 获取成功"
+        );
 
-        // 构造签到请求
+
+        // 4. 先检查签到页面当前状态
+        console.log(
+            "[奶昔签到] 检查今日签到状态"
+        );
+
+        let signPageResp = await get(SIGN_PAGE);
+        let signPage = signPageResp.data || "";
+
+
+        if (
+            signPage.includes("已签到") ||
+            signPage.includes("今日已签")
+        ) {
+
+            let info = parseInfo(signPage);
+
+            notify(
+                "今日已签到🎉",
+                buildMessage(info)
+            );
+
+            $done();
+            return;
+        }
+
+
+        // 5. 构造签到请求
         let signURL =
             SIGN_PAGE +
             "&operation=qiandao" +
             "&format=text" +
             "&formhash=" +
-            formhash;
+            encodeURIComponent(formhash);
 
 
-        // 执行签到
-        await get(signURL);
+        console.log(
+            "[奶昔签到] 执行签到"
+        );
 
 
-        // 等待页面数据更新
+        // 6. 执行签到
+        let signResp = await get(signURL);
+
+        let signResult =
+            signResp.data || "";
+
+
+        console.log(
+            "[奶昔签到] 签到接口返回：" +
+            clean(signResult)
+        );
+
+
+        // HAR 已确认接口可能直接返回 “已签到”
+        let apiSuccess =
+            signResult.includes("已签到") ||
+            signResult.includes("签到成功");
+
+
+        // 7. 等待数据更新
         await sleep(1000);
 
 
-        // 重新获取签到页面
-        let finalPage = await get(SIGN_PAGE);
+        // 8. 重新获取签到页面确认最终状态
+        console.log(
+            "[奶昔签到] 验证签到结果"
+        );
+
+        let finalResp =
+            await get(SIGN_PAGE);
+
+        let finalPage =
+            finalResp.data || "";
 
 
-        // 判断签到是否成功
-        if (finalPage.includes("已签到")) {
+        if (
+            finalPage.includes("已签到") ||
+            finalPage.includes("今日已签") ||
+            apiSuccess
+        ) {
 
-            let info = parseInfo(finalPage);
+            let info =
+                parseInfo(finalPage);
 
             notify(
-                "签到成功 🎉",
+                "签到成功🎉",
                 buildMessage(info)
             );
 
@@ -129,13 +224,18 @@ function get(url) {
 
             notify(
                 "❌ 签到失败",
-                "论坛签到页面状态异常"
+                "签到接口已执行，但未确认成功"
             );
 
         }
 
 
     } catch (e) {
+
+        console.log(
+            "[奶昔签到] 异常：" +
+            (e.message || String(e))
+        );
 
         notify(
             "❌ 签到异常",
@@ -225,10 +325,10 @@ function buildMessage(info) {
 }
 
 
-// 清理HTML
+// 清理 HTML
 function clean(str) {
 
-    return str
+    return String(str || "")
         .replace(/<[^>]+>/g, "")
         .replace(/&nbsp;/gi, " ")
         .replace(/&amp;/gi, "&")
@@ -249,7 +349,7 @@ function sleep(ms) {
 }
 
 
-// Loon通知
+// Loon 通知
 function notify(title, body) {
 
     $notification.post(
