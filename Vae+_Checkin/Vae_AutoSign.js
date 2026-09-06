@@ -2,32 +2,15 @@
  * Vae+ 自动签到 + 每日登录奖励
  * Vae_AutoSign.js
  *
- * 流程：
+ * 新增：
+ * - 每日登录奖励领取前检查
+ *   getTaskList 与 completeTask
+ *   是否属于同一个 JSESSID 会话
  *
- * 1. getRecord
- *    查询签到状态
- *
- * 2. 未签到
- *    → getRecordByMonth
- *    → 再次 getRecord 确认
- *
- * 3. 查询 getTaskList
- *
- * 4. 找到 taskKey=201
- *    「每日登录」
- *
- * 5. 如果 canReceive=true
- *    → completeTask taskKey=201
- *
- * 6. 再次查询任务列表确认
- *
- * 通知：
- *
- * 真正完成签到：
- * 签到成功🎉
- *
- * 已经签到：
- * 今日已签到🎉
+ * 如果检测到会话不同：
+ * - 不发送旧的 completeTask 请求
+ * - 保留签到成功结果
+ * - 提示奖励模板需要重新捕获
  */
 
 const STATUS_KEY =
@@ -50,7 +33,6 @@ const LAST_TOTAL_KEY =
 
 
 function log(msg) {
-
     console.log(
         "[Vae+ AutoSign] " +
         msg
@@ -63,7 +45,6 @@ function notify(
     subtitle,
     body
 ) {
-
     $notification.post(
         title || "",
         subtitle || "",
@@ -79,11 +60,9 @@ function parseJSON(text) {
     }
 
     try {
-
         return JSON.parse(text);
 
     } catch (e) {
-
         return null;
     }
 }
@@ -92,15 +71,11 @@ function parseJSON(text) {
 function readStore(key) {
 
     try {
-
-        return (
-            $persistentStore.read(
-                key
-            )
+        return $persistentStore.read(
+            key
         );
 
     } catch (e) {
-
         return null;
     }
 }
@@ -112,16 +87,12 @@ function writeStore(
 ) {
 
     try {
-
-        return (
-            $persistentStore.write(
-                String(value),
-                key
-            )
+        return $persistentStore.write(
+            String(value),
+            key
         );
 
     } catch (e) {
-
         return false;
     }
 }
@@ -137,16 +108,17 @@ function loadRequest(key) {
     }
 
     try {
-
         return JSON.parse(raw);
 
     } catch (e) {
-
         return null;
     }
 }
 
 
+/*
+ * 清理不适合重放的 Header。
+ */
 function cleanHeaders(headers) {
 
     const result = {};
@@ -178,6 +150,181 @@ function cleanHeaders(headers) {
         });
 
     return result;
+}
+
+
+/*
+ * 不区分大小写读取 Header。
+ */
+function getHeader(
+    headers,
+    name
+) {
+
+    if (!headers) {
+        return "";
+    }
+
+    const target =
+        String(name)
+            .toLowerCase();
+
+    const keys =
+        Object.keys(headers);
+
+    for (
+        let i = 0;
+        i < keys.length;
+        i++
+    ) {
+
+        if (
+            keys[i]
+                .toLowerCase() ===
+            target
+        ) {
+
+            return String(
+                headers[keys[i]] ||
+                ""
+            );
+        }
+    }
+
+    return "";
+}
+
+
+/*
+ * 从请求模板 Cookie 中读取指定值。
+ *
+ * 不打印 Cookie 内容，
+ * 避免敏感信息进入日志。
+ */
+function getCookieValue(
+    template,
+    cookieName
+) {
+
+    if (
+        !template ||
+        !template.headers
+    ) {
+        return "";
+    }
+
+    const cookie =
+        getHeader(
+            template.headers,
+            "Cookie"
+        );
+
+    if (!cookie) {
+        return "";
+    }
+
+    const parts =
+        cookie.split(";");
+
+    const target =
+        String(cookieName);
+
+    for (
+        let i = 0;
+        i < parts.length;
+        i++
+    ) {
+
+        const item =
+            parts[i].trim();
+
+        const pos =
+            item.indexOf("=");
+
+        if (pos <= 0) {
+            continue;
+        }
+
+        const name =
+            item.substring(
+                0,
+                pos
+            ).trim();
+
+        const value =
+            item.substring(
+                pos + 1
+            ).trim();
+
+        if (
+            name === target
+        ) {
+            return value;
+        }
+    }
+
+    return "";
+}
+
+
+/*
+ * 检查任务列表模板和奖励模板
+ * 是否来自同一个登录会话。
+ *
+ * 返回：
+ *
+ * same
+ *   JSESSID 相同
+ *
+ * different
+ *   JSESSID 不同
+ *
+ * unknown
+ *   某一模板没有可读取的 JSESSID
+ */
+function checkRewardSession(
+    taskListRequest,
+    rewardRequest
+) {
+
+    const taskSession =
+        getCookieValue(
+            taskListRequest,
+            "JSESSID"
+        );
+
+    const rewardSession =
+        getCookieValue(
+            rewardRequest,
+            "JSESSID"
+        );
+
+
+    if (
+        !taskSession ||
+        !rewardSession
+    ) {
+
+        return {
+            status: "unknown"
+        };
+    }
+
+
+    if (
+        taskSession ===
+        rewardSession
+    ) {
+
+        return {
+            status: "same"
+        };
+    }
+
+
+    return {
+        status: "different"
+    };
 }
 
 
@@ -216,16 +363,19 @@ function request(
         return;
     }
 
+
     const method =
         (
             template.method ||
             "POST"
         ).toUpperCase();
 
+
     const options =
         buildOptions(
             template
         );
+
 
     log(
         "Request Action: " +
@@ -235,13 +385,16 @@ function request(
         )
     );
 
+
     log(
         "Method: " +
         method
     );
 
 
-    if (method === "GET") {
+    if (
+        method === "GET"
+    ) {
 
         delete options.body;
 
@@ -308,7 +461,6 @@ function parseServerResponse(
     if (error) {
 
         return {
-
             ok: false,
 
             reason:
@@ -322,6 +474,7 @@ function parseServerResponse(
         getStatusCode(
             response
         );
+
 
     log(
         "HTTP Status: " +
@@ -405,11 +558,15 @@ function parseServerResponse(
 }
 
 
+/*
+ * 查找签到记录。
+ */
 function findSignRecord(obj) {
 
     if (
         !obj ||
-        typeof obj !== "object"
+        typeof obj !==
+            "object"
     ) {
         return null;
     }
@@ -452,6 +609,7 @@ function findSignRecord(obj) {
     const keys =
         Object.keys(obj);
 
+
     for (
         let i = 0;
         i < keys.length;
@@ -478,17 +636,22 @@ function findSignRecord(obj) {
         }
     }
 
+
     return null;
 }
 
 
+/*
+ * 查找签到成功动画。
+ */
 function findSignSuccessAnimation(
     obj
 ) {
 
     if (
         !obj ||
-        typeof obj !== "object"
+        typeof obj !==
+            "object"
     ) {
         return false;
     }
@@ -498,7 +661,6 @@ function findSignSuccessAnimation(
         obj.title ===
         "签到成功"
     ) {
-
         return true;
     }
 
@@ -529,6 +691,7 @@ function findSignSuccessAnimation(
     const keys =
         Object.keys(obj);
 
+
     for (
         let i = 0;
         i < keys.length;
@@ -549,11 +712,11 @@ function findSignSuccessAnimation(
                     value
                 )
             ) {
-
                 return true;
             }
         }
     }
+
 
     return false;
 }
@@ -564,14 +727,14 @@ function findSignSuccessAnimation(
  *
  * taskKey = 201
  */
-
 function findDailyLoginTask(
     obj
 ) {
 
     if (
         !obj ||
-        typeof obj !== "object"
+        typeof obj !==
+            "object"
     ) {
         return null;
     }
@@ -614,6 +777,7 @@ function findDailyLoginTask(
     const keys =
         Object.keys(obj);
 
+
     for (
         let i = 0;
         i < keys.length;
@@ -640,19 +804,20 @@ function findDailyLoginTask(
         }
     }
 
+
     return null;
 }
 
 
 /*
- * 在领取奖励响应里查找 vbi。
+ * 从领奖响应里查找 vbi。
  */
-
 function findVbi(obj) {
 
     if (
         !obj ||
-        typeof obj !== "object"
+        typeof obj !==
+            "object"
     ) {
         return null;
     }
@@ -703,6 +868,7 @@ function findVbi(obj) {
     const keys =
         Object.keys(obj);
 
+
     for (
         let i = 0;
         i < keys.length;
@@ -730,6 +896,7 @@ function findVbi(obj) {
             }
         }
     }
+
 
     return null;
 }
@@ -759,6 +926,7 @@ function getTodayString() {
             "0"
         );
 
+
     return (
         y +
         "-" +
@@ -770,7 +938,6 @@ function getTodayString() {
 
 
 function finish() {
-
     $done();
 }
 
@@ -788,10 +955,12 @@ function saveSignRecord(
             0
         );
 
+
     writeStore(
         LAST_DATE_KEY,
         today
     );
+
 
     writeStore(
         LAST_TOTAL_KEY,
@@ -800,6 +969,9 @@ function saveSignRecord(
 }
 
 
+/*
+ * 查询签到状态。
+ */
 function queryStatus(
     statusRequest,
     callback
@@ -888,6 +1060,9 @@ function queryStatus(
 }
 
 
+/*
+ * 执行签到。
+ */
 function performSign(
     signRequest,
     callback
@@ -958,7 +1133,6 @@ function performSign(
 /*
  * 查询任务中心。
  */
-
 function queryDailyTask(
     taskListRequest,
     callback
@@ -1050,7 +1224,6 @@ function queryDailyTask(
 /*
  * 领取 taskKey=201。
  */
-
 function claimDailyReward(
     rewardRequest,
     callback
@@ -1125,7 +1298,6 @@ function claimDailyReward(
 /*
  * 最终通知。
  */
-
 function reportResult(
     signedNow,
     signRecord,
@@ -1188,7 +1360,6 @@ function reportResult(
  * 签到完成后，
  * 处理每日登录 +50。
  */
-
 function runRewardFlow(
     signedNow,
     signRecord
@@ -1209,7 +1380,6 @@ function runRewardFlow(
      * 尚未捕获任务列表。
      * 不影响签到本身。
      */
-
     if (!taskListRequest) {
 
         log(
@@ -1253,7 +1423,6 @@ function runRewardFlow(
             /*
              * 已经领取。
              */
-
             if (
                 task.receiveReward ===
                     true
@@ -1276,7 +1445,6 @@ function runRewardFlow(
             /*
              * 可以领取。
              */
-
             if (
                 task.complete === true &&
                 task.canReceive === true
@@ -1298,6 +1466,60 @@ function runRewardFlow(
                 }
 
 
+                /*
+                 * 新增：
+                 * 在发送 completeTask 前
+                 * 检查 JSESSID 是否一致。
+                 */
+                const sessionCheck =
+                    checkRewardSession(
+                        taskListRequest,
+                        rewardRequest
+                    );
+
+
+                if (
+                    sessionCheck.status ===
+                    "different"
+                ) {
+
+                    log(
+                        "检测到奖励模板属于旧登录会话，停止领取"
+                    );
+
+
+                    reportResult(
+                        signedNow,
+                        signRecord,
+                        "模板已失效，请手动领取一次刷新"
+                    );
+
+                    return;
+                }
+
+
+                if (
+                    sessionCheck.status ===
+                    "same"
+                ) {
+
+                    log(
+                        "奖励模板会话一致，允许领取"
+                    );
+
+                } else {
+
+                    /*
+                     * 无法读取 JSESSID 时，
+                     * 不破坏原来的行为，
+                     * 继续尝试领取。
+                     */
+                    log(
+                        "无法读取 JSESSID，跳过会话校验"
+                    );
+                }
+
+
                 claimDailyReward(
                     rewardRequest,
                     function (
@@ -1313,11 +1535,32 @@ function runRewardFlow(
                                 claimResult.reason
                             );
 
-                            reportResult(
-                                signedNow,
-                                signRecord,
-                                "领取失败"
-                            );
+
+                            /*
+                             * 如果 Cookie 会话一致，
+                             * 但领奖仍失败，
+                             * 很可能是请求 Body
+                             * 存在其他时效性限制。
+                             */
+                            if (
+                                sessionCheck.status ===
+                                "same"
+                            ) {
+
+                                reportResult(
+                                    signedNow,
+                                    signRecord,
+                                    "领取失败（会话一致）"
+                                );
+
+                            } else {
+
+                                reportResult(
+                                    signedNow,
+                                    signRecord,
+                                    "领取失败"
+                                );
+                            }
 
                             return;
                         }
@@ -1327,7 +1570,6 @@ function runRewardFlow(
                          * 领取后再次查询任务状态，
                          * 做最终确认。
                          */
-
                         log(
                             "奖励请求完成，开始最终确认"
                         );
@@ -1352,6 +1594,7 @@ function runRewardFlow(
                                 ) {
 
                                     let rewardText;
+
 
                                     if (
                                         claimResult.vbi !==
@@ -1388,7 +1631,6 @@ function runRewardFlow(
                                  * 请求本身成功，
                                  * 但最终状态无法确认。
                                  */
-
                                 log(
                                     "奖励最终状态未确认"
                                 );
@@ -1426,7 +1668,6 @@ function runRewardFlow(
             /*
              * 每日登录任务尚未完成。
              */
-
             if (
                 task.complete === false
             ) {
@@ -1449,10 +1690,10 @@ function runRewardFlow(
              * complete=true
              * 但目前不能领取。
              */
-
             log(
                 "每日登录奖励当前不可领取"
             );
+
 
             reportResult(
                 signedNow,
@@ -1512,7 +1753,6 @@ function start() {
      * 第一阶段：
      * 查询今天是否签到。
      */
-
     queryStatus(
         statusRequest,
         function (
@@ -1537,11 +1777,9 @@ function start() {
 
             /*
              * 今天已经签到。
-             *
              * 仍然继续检查
              * 每日登录 +50。
              */
-
             if (
                 signRecord.signToday ===
                     true
@@ -1563,7 +1801,6 @@ function start() {
             /*
              * 今天还没签到。
              */
-
             performSign(
                 signRequest,
                 function (
@@ -1589,7 +1826,6 @@ function start() {
                      * 再次 getRecord
                      * 确认服务器状态。
                      */
-
                     log(
                         "签到请求完成，开始最终确认"
                     );
@@ -1630,7 +1866,6 @@ function start() {
                                 /*
                                  * 签到成功后继续领奖励。
                                  */
-
                                 runRewardFlow(
                                     true,
                                     finalRecord
