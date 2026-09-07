@@ -1,55 +1,72 @@
 /*
  * Vae+ 自动签到 + 每日登录奖励
- * Vae_AutoSign.js
  *
- * 新增：
- * - 每日登录奖励领取前检查
- *   getTaskList 与 completeTask
- *   是否属于同一个 JSESSID 会话
- *
- * 如果检测到会话不同：
- * - 不发送旧的 completeTask 请求
- * - 保留签到成功结果
- * - 提示奖励模板需要重新捕获
+ * 实验版：
+ * - 签到流程保持不变
+ * - 每日登录奖励 taskKey=201
+ * - 如果 completeTask 模板与当前 getTaskList
+ *   的 JSESSID 不一致：
+ *   使用当前 getTaskList 的 Cookie
+ *   覆盖奖励模板 Cookie 后尝试领取
  */
 
-const STATUS_KEY =
-    "VAE_STATUS_REQUEST";
+const STATUS_KEY = "VAE_STATUS_REQUEST";
+const SIGN_KEY = "VAE_SIGN_REQUEST";
+const TASK_LIST_KEY = "VAE_TASK_LIST_REQUEST";
+const DAILY_REWARD_KEY = "VAE_DAILY_REWARD_REQUEST";
 
-const SIGN_KEY =
-    "VAE_SIGN_REQUEST";
-
-const TASK_LIST_KEY =
-    "VAE_TASK_LIST_REQUEST";
-
-const DAILY_REWARD_KEY =
-    "VAE_DAILY_REWARD_REQUEST";
-
-const LAST_DATE_KEY =
-    "VAE_LAST_SIGN_DATE";
-
-const LAST_TOTAL_KEY =
-    "VAE_LAST_SIGN_TOTAL";
+const LAST_DATE_KEY = "VAE_LAST_SIGN_DATE";
+const LAST_TOTAL_KEY = "VAE_LAST_SIGN_TOTAL";
 
 
 function log(msg) {
-    console.log(
-        "[Vae+ AutoSign] " +
-        msg
-    );
+    console.log("[Vae+ AutoSign] " + msg);
 }
 
 
-function notify(
-    title,
-    subtitle,
-    body
-) {
+function notify(title, subtitle, body) {
     $notification.post(
         title || "",
         subtitle || "",
         body || ""
     );
+}
+
+
+function readStore(key) {
+    try {
+        return $persistentStore.read(key);
+    } catch (e) {
+        return null;
+    }
+}
+
+
+function writeStore(key, value) {
+    try {
+        return $persistentStore.write(
+            String(value),
+            key
+        );
+    } catch (e) {
+        return false;
+    }
+}
+
+
+function loadRequest(key) {
+
+    const raw = readStore(key);
+
+    if (!raw) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        return null;
+    }
 }
 
 
@@ -61,64 +78,12 @@ function parseJSON(text) {
 
     try {
         return JSON.parse(text);
-
     } catch (e) {
         return null;
     }
 }
 
 
-function readStore(key) {
-
-    try {
-        return $persistentStore.read(
-            key
-        );
-
-    } catch (e) {
-        return null;
-    }
-}
-
-
-function writeStore(
-    key,
-    value
-) {
-
-    try {
-        return $persistentStore.write(
-            String(value),
-            key
-        );
-
-    } catch (e) {
-        return false;
-    }
-}
-
-
-function loadRequest(key) {
-
-    const raw =
-        readStore(key);
-
-    if (!raw) {
-        return null;
-    }
-
-    try {
-        return JSON.parse(raw);
-
-    } catch (e) {
-        return null;
-    }
-}
-
-
-/*
- * 清理不适合重放的 Header。
- */
 function cleanHeaders(headers) {
 
     const result = {};
@@ -127,66 +92,42 @@ function cleanHeaders(headers) {
         return result;
     }
 
-    Object.keys(headers)
-        .forEach(function (key) {
+    Object.keys(headers).forEach(function (key) {
 
-            const lower =
-                key.toLowerCase();
+        const lower = key.toLowerCase();
 
-            if (
-                lower ===
-                    "content-length" ||
-                lower === "host" ||
-                lower ===
-                    "connection" ||
-                lower ===
-                    "accept-encoding"
-            ) {
-                return;
-            }
+        if (
+            lower === "content-length" ||
+            lower === "host" ||
+            lower === "connection" ||
+            lower === "accept-encoding"
+        ) {
+            return;
+        }
 
-            result[key] =
-                headers[key];
-        });
+        result[key] = headers[key];
+    });
 
     return result;
 }
 
 
-/*
- * 不区分大小写读取 Header。
- */
-function getHeader(
-    headers,
-    name
-) {
+function getHeader(headers, name) {
 
     if (!headers) {
         return "";
     }
 
-    const target =
-        String(name)
-            .toLowerCase();
+    const target = name.toLowerCase();
+    const keys = Object.keys(headers);
 
-    const keys =
-        Object.keys(headers);
-
-    for (
-        let i = 0;
-        i < keys.length;
-        i++
-    ) {
+    for (let i = 0; i < keys.length; i++) {
 
         if (
-            keys[i]
-                .toLowerCase() ===
-            target
+            keys[i].toLowerCase() === target
         ) {
-
             return String(
-                headers[keys[i]] ||
-                ""
+                headers[keys[i]] || ""
             );
         }
     }
@@ -195,16 +136,34 @@ function getHeader(
 }
 
 
-/*
- * 从请求模板 Cookie 中读取指定值。
- *
- * 不打印 Cookie 内容，
- * 避免敏感信息进入日志。
- */
-function getCookieValue(
-    template,
-    cookieName
-) {
+function setHeader(headers, name, value) {
+
+    const result =
+        Object.assign({}, headers || {});
+
+    const target =
+        name.toLowerCase();
+
+    const keys =
+        Object.keys(result);
+
+    for (let i = 0; i < keys.length; i++) {
+
+        if (
+            keys[i].toLowerCase() === target
+        ) {
+
+            delete result[keys[i]];
+        }
+    }
+
+    result[name] = value;
+
+    return result;
+}
+
+
+function getCookieValue(template, cookieName) {
 
     if (
         !template ||
@@ -226,9 +185,6 @@ function getCookieValue(
     const parts =
         cookie.split(";");
 
-    const target =
-        String(cookieName);
-
     for (
         let i = 0;
         i < parts.length;
@@ -246,18 +202,17 @@ function getCookieValue(
         }
 
         const name =
-            item.substring(
-                0,
-                pos
-            ).trim();
+            item
+                .substring(0, pos)
+                .trim();
 
         const value =
-            item.substring(
-                pos + 1
-            ).trim();
+            item
+                .substring(pos + 1)
+                .trim();
 
         if (
-            name === target
+            name === cookieName
         ) {
             return value;
         }
@@ -267,29 +222,14 @@ function getCookieValue(
 }
 
 
-/*
- * 检查任务列表模板和奖励模板
- * 是否来自同一个登录会话。
- *
- * 返回：
- *
- * same
- *   JSESSID 相同
- *
- * different
- *   JSESSID 不同
- *
- * unknown
- *   某一模板没有可读取的 JSESSID
- */
 function checkRewardSession(
-    taskListRequest,
+    taskRequest,
     rewardRequest
 ) {
 
     const taskSession =
         getCookieValue(
-            taskListRequest,
+            taskRequest,
             "JSESSID"
         );
 
@@ -299,32 +239,95 @@ function checkRewardSession(
             "JSESSID"
         );
 
-
     if (
         !taskSession ||
         !rewardSession
     ) {
-
-        return {
-            status: "unknown"
-        };
+        return "unknown";
     }
-
 
     if (
-        taskSession ===
-        rewardSession
+        taskSession === rewardSession
     ) {
-
-        return {
-            status: "same"
-        };
+        return "same";
     }
 
+    return "different";
+}
 
-    return {
-        status: "different"
+
+/*
+ * 实验核心：
+ *
+ * 保留奖励模板的：
+ * - URL
+ * - Body
+ * - 其他 Header
+ *
+ * 仅替换 Cookie 为当前 getTaskList 使用的 Cookie。
+ */
+function buildRewardRequestWithCurrentCookie(
+    rewardRequest,
+    taskListRequest
+) {
+
+    if (
+        !rewardRequest ||
+        !taskListRequest
+    ) {
+        return null;
+    }
+
+    const currentCookie =
+        getHeader(
+            taskListRequest.headers,
+            "Cookie"
+        );
+
+    if (!currentCookie) {
+
+        log(
+            "当前任务列表模板没有 Cookie"
+        );
+
+        return null;
+    }
+
+    const cloned = {
+
+        action:
+            rewardRequest.action,
+
+        url:
+            rewardRequest.url,
+
+        method:
+            rewardRequest.method,
+
+        headers:
+            Object.assign(
+                {},
+                rewardRequest.headers || {}
+            ),
+
+        body:
+            rewardRequest.body || ""
     };
+
+
+    cloned.headers =
+        setHeader(
+            cloned.headers,
+            "Cookie",
+            currentCookie
+        );
+
+
+    log(
+        "已使用当前任务列表 Cookie 构造奖励请求"
+    );
+
+    return cloned;
 }
 
 
@@ -337,8 +340,7 @@ function buildOptions(template) {
 
         headers:
             cleanHeaders(
-                template.headers ||
-                {}
+                template.headers || {}
             ),
 
         body:
@@ -347,10 +349,7 @@ function buildOptions(template) {
 }
 
 
-function request(
-    template,
-    callback
-) {
+function request(template, callback) {
 
     if (!template) {
 
@@ -363,19 +362,14 @@ function request(
         return;
     }
 
-
     const method =
         (
             template.method ||
             "POST"
         ).toUpperCase();
 
-
     const options =
-        buildOptions(
-            template
-        );
-
+        buildOptions(template);
 
     log(
         "Request Action: " +
@@ -385,60 +379,31 @@ function request(
         )
     );
 
-
     log(
         "Method: " +
         method
     );
 
-
-    if (
-        method === "GET"
-    ) {
+    if (method === "GET") {
 
         delete options.body;
 
         $httpClient.get(
             options,
-            function (
-                error,
-                response,
-                data
-            ) {
-
-                callback(
-                    error,
-                    response,
-                    data
-                );
-            }
+            callback
         );
 
         return;
     }
 
-
     $httpClient.post(
         options,
-        function (
-            error,
-            response,
-            data
-        ) {
-
-            callback(
-                error,
-                response,
-                data
-            );
-        }
+        callback
     );
 }
 
 
-function getStatusCode(
-    response
-) {
+function getStatusCode(response) {
 
     if (!response) {
         return 0;
@@ -462,25 +427,19 @@ function parseServerResponse(
 
         return {
             ok: false,
-
             reason:
                 "网络错误：" +
                 String(error)
         };
     }
 
-
     const statusCode =
-        getStatusCode(
-            response
-        );
-
+        getStatusCode(response);
 
     log(
         "HTTP Status: " +
         statusCode
     );
-
 
     if (
         statusCode === 401 ||
@@ -488,11 +447,8 @@ function parseServerResponse(
     ) {
 
         return {
-
             ok: false,
-
             authExpired: true,
-
             reason:
                 "HTTP " +
                 statusCode +
@@ -500,47 +456,37 @@ function parseServerResponse(
         };
     }
 
-
     if (
         statusCode < 200 ||
         statusCode >= 300
     ) {
 
         return {
-
             ok: false,
-
             reason:
                 "HTTP " +
                 statusCode
         };
     }
 
-
     const json =
         parseJSON(data);
-
 
     if (!json) {
 
         return {
-
             ok: false,
-
             reason:
                 "服务器响应不是有效 JSON"
         };
     }
-
 
     if (
         json.state === false
     ) {
 
         return {
-
             ok: false,
-
             reason:
                 json.errMsg ||
                 json.message ||
@@ -548,43 +494,31 @@ function parseServerResponse(
         };
     }
 
-
     return {
-
         ok: true,
-
         json: json
     };
 }
 
 
-/*
- * 查找签到记录。
- */
 function findSignRecord(obj) {
 
     if (
         !obj ||
-        typeof obj !==
-            "object"
+        typeof obj !== "object"
     ) {
         return null;
     }
-
 
     if (
         obj.signRecord &&
         typeof obj.signRecord ===
             "object"
     ) {
-
         return obj.signRecord;
     }
 
-
-    if (
-        Array.isArray(obj)
-    ) {
+    if (Array.isArray(obj)) {
 
         for (
             let i = 0;
@@ -605,10 +539,8 @@ function findSignRecord(obj) {
         return null;
     }
 
-
     const keys =
         Object.keys(obj);
-
 
     for (
         let i = 0;
@@ -621,8 +553,7 @@ function findSignRecord(obj) {
 
         if (
             value &&
-            typeof value ===
-                "object"
+            typeof value === "object"
         ) {
 
             const result =
@@ -636,26 +567,18 @@ function findSignRecord(obj) {
         }
     }
 
-
     return null;
 }
 
 
-/*
- * 查找签到成功动画。
- */
-function findSignSuccessAnimation(
-    obj
-) {
+function findSignSuccessAnimation(obj) {
 
     if (
         !obj ||
-        typeof obj !==
-            "object"
+        typeof obj !== "object"
     ) {
         return false;
     }
-
 
     if (
         obj.title ===
@@ -664,10 +587,7 @@ function findSignSuccessAnimation(
         return true;
     }
 
-
-    if (
-        Array.isArray(obj)
-    ) {
+    if (Array.isArray(obj)) {
 
         for (
             let i = 0;
@@ -687,10 +607,8 @@ function findSignSuccessAnimation(
         return false;
     }
 
-
     const keys =
         Object.keys(obj);
-
 
     for (
         let i = 0;
@@ -703,8 +621,7 @@ function findSignSuccessAnimation(
 
         if (
             value &&
-            typeof value ===
-                "object"
+            typeof value === "object"
         ) {
 
             if (
@@ -717,42 +634,28 @@ function findSignSuccessAnimation(
         }
     }
 
-
     return false;
 }
 
 
-/*
- * 查找每日登录任务。
- *
- * taskKey = 201
- */
-function findDailyLoginTask(
-    obj
-) {
+function findDailyLoginTask(obj) {
 
     if (
         !obj ||
-        typeof obj !==
-            "object"
+        typeof obj !== "object"
     ) {
         return null;
     }
-
 
     if (
         String(
             obj.taskKey
         ) === "201"
     ) {
-
         return obj;
     }
 
-
-    if (
-        Array.isArray(obj)
-    ) {
+    if (Array.isArray(obj)) {
 
         for (
             let i = 0;
@@ -773,10 +676,8 @@ function findDailyLoginTask(
         return null;
     }
 
-
     const keys =
         Object.keys(obj);
-
 
     for (
         let i = 0;
@@ -789,8 +690,7 @@ function findDailyLoginTask(
 
         if (
             value &&
-            typeof value ===
-                "object"
+            typeof value === "object"
         ) {
 
             const result =
@@ -804,24 +704,18 @@ function findDailyLoginTask(
         }
     }
 
-
     return null;
 }
 
 
-/*
- * 从领奖响应里查找 vbi。
- */
 function findVbi(obj) {
 
     if (
         !obj ||
-        typeof obj !==
-            "object"
+        typeof obj !== "object"
     ) {
         return null;
     }
-
 
     if (
         obj.vbi !== undefined &&
@@ -831,17 +725,12 @@ function findVbi(obj) {
         const number =
             Number(obj.vbi);
 
-        if (
-            !isNaN(number)
-        ) {
+        if (!isNaN(number)) {
             return number;
         }
     }
 
-
-    if (
-        Array.isArray(obj)
-    ) {
+    if (Array.isArray(obj)) {
 
         for (
             let i = 0;
@@ -864,10 +753,8 @@ function findVbi(obj) {
         return null;
     }
 
-
     const keys =
         Object.keys(obj);
-
 
     for (
         let i = 0;
@@ -880,14 +767,11 @@ function findVbi(obj) {
 
         if (
             value &&
-            typeof value ===
-                "object"
+            typeof value === "object"
         ) {
 
             const result =
-                findVbi(
-                    value
-                );
+                findVbi(value);
 
             if (
                 result !== null
@@ -897,90 +781,16 @@ function findVbi(obj) {
         }
     }
 
-
     return null;
 }
 
 
-function getTodayString() {
-
-    const d =
-        new Date();
-
-    const y =
-        d.getFullYear();
-
-    const m =
-        String(
-            d.getMonth() + 1
-        ).padStart(
-            2,
-            "0"
-        );
-
-    const day =
-        String(
-            d.getDate()
-        ).padStart(
-            2,
-            "0"
-        );
-
-
-    return (
-        y +
-        "-" +
-        m +
-        "-" +
-        day
-    );
-}
-
-
-function finish() {
-    $done();
-}
-
-
-function saveSignRecord(
-    signRecord
-) {
-
-    const today =
-        getTodayString();
-
-    const total =
-        Number(
-            signRecord.totalCount ||
-            0
-        );
-
-
-    writeStore(
-        LAST_DATE_KEY,
-        today
-    );
-
-
-    writeStore(
-        LAST_TOTAL_KEY,
-        total
-    );
-}
-
-
-/*
- * 查询签到状态。
- */
 function queryStatus(
     statusRequest,
     callback
 ) {
 
-    log(
-        "查询签到状态"
-    );
-
+    log("查询签到状态");
 
     request(
         statusRequest,
@@ -997,7 +807,6 @@ function queryStatus(
                     data
                 );
 
-
             if (!result.ok) {
 
                 callback(
@@ -1008,19 +817,16 @@ function queryStatus(
                 return;
             }
 
-
             const signRecord =
                 findSignRecord(
                     result.json
                 );
-
 
             if (!signRecord) {
 
                 callback(
                     {
                         ok: false,
-
                         reason:
                             "未找到 signRecord"
                     },
@@ -1029,7 +835,6 @@ function queryStatus(
 
                 return;
             }
-
 
             log(
                 "signToday=" +
@@ -1046,7 +851,6 @@ function queryStatus(
                 signRecord.totalCount
             );
 
-
             callback(
                 {
                     ok: true,
@@ -1060,9 +864,6 @@ function queryStatus(
 }
 
 
-/*
- * 执行签到。
- */
 function performSign(
     signRequest,
     callback
@@ -1071,7 +872,6 @@ function performSign(
     log(
         "今日未签到，开始执行签到请求"
     );
-
 
     request(
         signRequest,
@@ -1088,23 +888,18 @@ function performSign(
                     data
                 );
 
-
             if (!result.ok) {
 
                 callback(result);
                 return;
             }
 
-
-            const animationSuccess =
+            const success =
                 findSignSuccessAnimation(
                     result.json
                 );
 
-
-            if (
-                animationSuccess
-            ) {
+            if (success) {
 
                 log(
                     "签到接口返回：签到成功"
@@ -1117,22 +912,14 @@ function performSign(
                 );
             }
 
-
             callback({
-
-                ok: true,
-
-                animationSuccess:
-                    animationSuccess
+                ok: true
             });
         }
     );
 }
 
 
-/*
- * 查询任务中心。
- */
 function queryDailyTask(
     taskListRequest,
     callback
@@ -1141,7 +928,6 @@ function queryDailyTask(
     log(
         "查询每日登录任务状态"
     );
-
 
     request(
         taskListRequest,
@@ -1158,7 +944,6 @@ function queryDailyTask(
                     data
                 );
 
-
             if (!result.ok) {
 
                 callback(
@@ -1169,19 +954,16 @@ function queryDailyTask(
                 return;
             }
 
-
             const task =
                 findDailyLoginTask(
                     result.json
                 );
-
 
             if (!task) {
 
                 callback(
                     {
                         ok: false,
-
                         reason:
                             "未找到每日登录任务 taskKey=201"
                     },
@@ -1190,7 +972,6 @@ function queryDailyTask(
 
                 return;
             }
-
 
             log(
                 "每日登录 complete=" +
@@ -1207,7 +988,6 @@ function queryDailyTask(
                 task.receiveReward
             );
 
-
             callback(
                 {
                     ok: true,
@@ -1221,9 +1001,6 @@ function queryDailyTask(
 }
 
 
-/*
- * 领取 taskKey=201。
- */
 function claimDailyReward(
     rewardRequest,
     callback
@@ -1232,7 +1009,6 @@ function claimDailyReward(
     log(
         "开始领取每日登录奖励"
     );
-
 
     request(
         rewardRequest,
@@ -1249,19 +1025,16 @@ function claimDailyReward(
                     data
                 );
 
-
             if (!result.ok) {
 
                 callback(result);
                 return;
             }
 
-
             const vbi =
                 findVbi(
                     result.json
                 );
-
 
             if (
                 vbi !== null
@@ -1279,7 +1052,6 @@ function claimDailyReward(
                 );
             }
 
-
             callback({
 
                 ok: true,
@@ -1295,47 +1067,77 @@ function claimDailyReward(
 }
 
 
-/*
- * 最终通知。
- */
+function getTodayString() {
+
+    const d =
+        new Date();
+
+    return (
+        d.getFullYear() +
+        "-" +
+        String(
+            d.getMonth() + 1
+        ).padStart(2, "0") +
+        "-" +
+        String(
+            d.getDate()
+        ).padStart(2, "0")
+    );
+}
+
+
+function saveSignRecord(
+    signRecord
+) {
+
+    writeStore(
+        LAST_DATE_KEY,
+        getTodayString()
+    );
+
+    writeStore(
+        LAST_TOTAL_KEY,
+        Number(
+            signRecord.totalCount ||
+            0
+        )
+    );
+}
+
+
+function finish() {
+    $done();
+}
+
+
 function reportResult(
     signedNow,
     signRecord,
     rewardText
 ) {
 
-    const continuity =
-        Number(
-            signRecord.continuity ||
-            0
-        );
-
-    const total =
-        Number(
-            signRecord.totalCount ||
-            0
-        );
-
-
     saveSignRecord(
         signRecord
     );
-
 
     const subtitle =
         signedNow
             ? "签到成功🎉"
             : "今日已签到🎉";
 
-
     let body =
         "连续签到：" +
-        continuity +
+        Number(
+            signRecord.continuity ||
+            0
+        ) +
         "天\n" +
         "累计签到：" +
-        total +
+        Number(
+            signRecord.totalCount ||
+            0
+        ) +
         "天";
-
 
     if (rewardText) {
 
@@ -1344,21 +1146,18 @@ function reportResult(
             rewardText;
     }
 
-
     notify(
         "Vae+ 每日签到",
         subtitle,
         body
     );
 
-
     finish();
 }
 
 
 /*
- * 签到完成后，
- * 处理每日登录 +50。
+ * 每日奖励流程
  */
 function runRewardFlow(
     signedNow,
@@ -1376,15 +1175,7 @@ function runRewardFlow(
         );
 
 
-    /*
-     * 尚未捕获任务列表。
-     * 不影响签到本身。
-     */
     if (!taskListRequest) {
-
-        log(
-            "缺少任务列表请求模板"
-        );
 
         reportResult(
             signedNow,
@@ -1420,12 +1211,8 @@ function runRewardFlow(
             }
 
 
-            /*
-             * 已经领取。
-             */
             if (
-                task.receiveReward ===
-                    true
+                task.receiveReward === true
             ) {
 
                 log(
@@ -1442,19 +1229,12 @@ function runRewardFlow(
             }
 
 
-            /*
-             * 可以领取。
-             */
             if (
                 task.complete === true &&
                 task.canReceive === true
             ) {
 
                 if (!rewardRequest) {
-
-                    log(
-                        "缺少每日登录奖励请求模板"
-                    );
 
                     reportResult(
                         signedNow,
@@ -1466,62 +1246,74 @@ function runRewardFlow(
                 }
 
 
-                /*
-                 * 新增：
-                 * 在发送 completeTask 前
-                 * 检查 JSESSID 是否一致。
-                 */
-                const sessionCheck =
+                const sessionState =
                     checkRewardSession(
                         taskListRequest,
                         rewardRequest
                     );
 
 
+                let requestToUse =
+                    rewardRequest;
+
+
                 if (
-                    sessionCheck.status ===
+                    sessionState ===
                     "different"
                 ) {
 
                     log(
-                        "检测到奖励模板属于旧登录会话，停止领取"
+                        "奖励模板会话不一致"
+                    );
+
+                    log(
+                        "尝试使用当前任务列表 Cookie 重建奖励请求"
                     );
 
 
-                    reportResult(
-                        signedNow,
-                        signRecord,
-                        "模板已失效，请手动领取一次刷新"
-                    );
-
-                    return;
-                }
+                    const rebuilt =
+                        buildRewardRequestWithCurrentCookie(
+                            rewardRequest,
+                            taskListRequest
+                        );
 
 
-                if (
-                    sessionCheck.status ===
+                    if (!rebuilt) {
+
+                        reportResult(
+                            signedNow,
+                            signRecord,
+                            "模板已失效"
+                        );
+
+                        return;
+                    }
+
+
+                    requestToUse =
+                        rebuilt;
+
+
+                } else if (
+                    sessionState ===
                     "same"
                 ) {
 
                     log(
-                        "奖励模板会话一致，允许领取"
+                        "奖励模板会话一致"
                     );
+
 
                 } else {
 
-                    /*
-                     * 无法读取 JSESSID 时，
-                     * 不破坏原来的行为，
-                     * 继续尝试领取。
-                     */
                     log(
-                        "无法读取 JSESSID，跳过会话校验"
+                        "无法判断奖励模板会话"
                     );
                 }
 
 
                 claimDailyReward(
-                    rewardRequest,
+                    requestToUse,
                     function (
                         claimResult
                     ) {
@@ -1536,21 +1328,15 @@ function runRewardFlow(
                             );
 
 
-                            /*
-                             * 如果 Cookie 会话一致，
-                             * 但领奖仍失败，
-                             * 很可能是请求 Body
-                             * 存在其他时效性限制。
-                             */
                             if (
-                                sessionCheck.status ===
-                                "same"
+                                sessionState ===
+                                "different"
                             ) {
 
                                 reportResult(
                                     signedNow,
                                     signRecord,
-                                    "领取失败（会话一致）"
+                                    "Cookie替换后领取失败"
                                 );
 
                             } else {
@@ -1566,10 +1352,6 @@ function runRewardFlow(
                         }
 
 
-                        /*
-                         * 领取后再次查询任务状态，
-                         * 做最终确认。
-                         */
                         log(
                             "奖励请求完成，开始最终确认"
                         );
@@ -1585,15 +1367,12 @@ function runRewardFlow(
                                 if (
                                     verifyResult.ok &&
                                     verifyTask &&
-                                    (
-                                        verifyTask.receiveReward ===
-                                            true ||
-                                        verifyTask.canReceive ===
-                                            false
-                                    )
+                                    verifyTask.receiveReward ===
+                                        true
                                 ) {
 
-                                    let rewardText;
+                                    let text =
+                                        "已领取";
 
 
                                     if (
@@ -1601,14 +1380,9 @@ function runRewardFlow(
                                         null
                                     ) {
 
-                                        rewardText =
+                                        text =
                                             "+" +
                                             claimResult.vbi;
-
-                                    } else {
-
-                                        rewardText =
-                                            "已领取";
                                     }
 
 
@@ -1620,7 +1394,7 @@ function runRewardFlow(
                                     reportResult(
                                         signedNow,
                                         signRecord,
-                                        rewardText
+                                        text
                                     );
 
                                     return;
@@ -1628,14 +1402,10 @@ function runRewardFlow(
 
 
                                 /*
-                                 * 请求本身成功，
-                                 * 但最终状态无法确认。
+                                 * 如果接口明确返回了 vbi，
+                                 * 即使二次状态查询没确认，
+                                 * 也保留接口成功结果。
                                  */
-                                log(
-                                    "奖励最终状态未确认"
-                                );
-
-
                                 if (
                                     claimResult.vbi !==
                                     null
@@ -1653,7 +1423,7 @@ function runRewardFlow(
                                     reportResult(
                                         signedNow,
                                         signRecord,
-                                        "请求已执行"
+                                        "请求已执行，状态未确认"
                                     );
                                 }
                             }
@@ -1665,16 +1435,9 @@ function runRewardFlow(
             }
 
 
-            /*
-             * 每日登录任务尚未完成。
-             */
             if (
                 task.complete === false
             ) {
-
-                log(
-                    "每日登录任务尚未完成"
-                );
 
                 reportResult(
                     signedNow,
@@ -1684,15 +1447,6 @@ function runRewardFlow(
 
                 return;
             }
-
-
-            /*
-             * complete=true
-             * 但目前不能领取。
-             */
-            log(
-                "每日登录奖励当前不可领取"
-            );
 
 
             reportResult(
@@ -1728,7 +1482,7 @@ function start() {
         notify(
             "Vae+ 每日签到",
             "缺少状态查询请求",
-            "请先打开 Vae+ 的「发现」页面重新捕获请求。"
+            "请打开 Vae+ 后重新捕获。"
         );
 
         finish();
@@ -1741,7 +1495,7 @@ function start() {
         notify(
             "Vae+ 每日签到",
             "缺少签到请求",
-            "请进入一次「发现 → 每日签到」重新捕获请求。"
+            "请进入一次每日签到页面重新捕获。"
         );
 
         finish();
@@ -1749,10 +1503,6 @@ function start() {
     }
 
 
-    /*
-     * 第一阶段：
-     * 查询今天是否签到。
-     */
     queryStatus(
         statusRequest,
         function (
@@ -1760,9 +1510,7 @@ function start() {
             signRecord
         ) {
 
-            if (
-                !statusResult.ok
-            ) {
+            if (!statusResult.ok) {
 
                 notify(
                     "Vae+ 每日签到",
@@ -1775,11 +1523,6 @@ function start() {
             }
 
 
-            /*
-             * 今天已经签到。
-             * 仍然继续检查
-             * 每日登录 +50。
-             */
             if (
                 signRecord.signToday ===
                     true
@@ -1798,18 +1541,13 @@ function start() {
             }
 
 
-            /*
-             * 今天还没签到。
-             */
             performSign(
                 signRequest,
                 function (
                     signResult
                 ) {
 
-                    if (
-                        !signResult.ok
-                    ) {
+                    if (!signResult.ok) {
 
                         notify(
                             "Vae+ 每日签到",
@@ -1822,10 +1560,6 @@ function start() {
                     }
 
 
-                    /*
-                     * 再次 getRecord
-                     * 确认服务器状态。
-                     */
                     log(
                         "签到请求完成，开始最终确认"
                     );
@@ -1862,10 +1596,6 @@ function start() {
                                     "服务器最终确认 signToday=true"
                                 );
 
-
-                                /*
-                                 * 签到成功后继续领奖励。
-                                 */
                                 runRewardFlow(
                                     true,
                                     finalRecord
@@ -1875,23 +1605,11 @@ function start() {
                             }
 
 
-                            log(
-                                "最终确认 signToday=false"
-                            );
-
-
                             notify(
                                 "Vae+ 每日签到",
                                 "今日未签到⚠️",
-                                "签到请求已执行，但服务器最终仍返回未签到。\n" +
-                                "累计签到：" +
-                                Number(
-                                    finalRecord.totalCount ||
-                                    0
-                                ) +
-                                "天"
+                                "签到请求已执行，但服务器最终仍返回未签到。"
                             );
-
 
                             finish();
                         }
