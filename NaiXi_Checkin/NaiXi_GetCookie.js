@@ -1,28 +1,23 @@
 /*
  * 奶昔论坛 Cookie 获取
- * Loon http-request
+ * Loon http-response
  *
- * 改进：
- * 1. 不再用残缺 Cookie 覆盖完整 Cookie
- * 2. 新旧 Cookie 自动合并
- * 3. 只有存在登录认证 Cookie 时才保存
- * 4. Cookie 没变化时不重复通知
- * 5. 不修改网页响应
+ * 只监听真正的登录提交响应：
+ * member.php?mod=logging&action=login&loginsubmit=yes
+ *
+ * 从响应 Set-Cookie 中提取最新登录 Cookie，
+ * 再与原有 Cookie 合并。
+ *
+ * 不修改网页响应。
  */
 
 const COOKIE_KEY = "NaixiCookie";
 
-function log(message) {
-    console.log(
-        "[奶昔 Cookie] " + message
-    );
+function log(msg) {
+    console.log("[奶昔 Cookie] " + msg);
 }
 
-function notify(
-    title,
-    subtitle,
-    body
-) {
+function notify(title, subtitle, body) {
     $notification.post(
         title || "",
         subtitle || "",
@@ -32,48 +27,9 @@ function notify(
 
 
 /*
- * 不区分大小写读取 Header
+ * Cookie 字符串转对象
  */
-function getHeader(
-    headers,
-    name
-) {
-
-    if (!headers) {
-        return "";
-    }
-
-    const target =
-        String(name).toLowerCase();
-
-    const keys =
-        Object.keys(headers);
-
-    for (
-        let i = 0;
-        i < keys.length;
-        i++
-    ) {
-
-        if (
-            keys[i].toLowerCase() ===
-            target
-        ) {
-
-            return String(
-                headers[keys[i]] || ""
-            );
-        }
-    }
-
-    return "";
-}
-
-
-/*
- * Cookie 字符串 → 对象
- */
-function parseCookie(cookie) {
+function parseCookieString(cookie) {
 
     const result = {};
 
@@ -91,27 +47,17 @@ function parseCookie(cookie) {
                 return;
             }
 
-            const pos =
-                item.indexOf("=");
+            const index = item.indexOf("=");
 
-            if (pos <= 0) {
+            if (index <= 0) {
                 return;
             }
 
             const name =
-                item
-                    .substring(
-                        0,
-                        pos
-                    )
-                    .trim();
+                item.substring(0, index).trim();
 
             const value =
-                item
-                    .substring(
-                        pos + 1
-                    )
-                    .trim();
+                item.substring(index + 1).trim();
 
             if (!name) {
                 return;
@@ -125,7 +71,7 @@ function parseCookie(cookie) {
 
 
 /*
- * Cookie 对象 → 字符串
+ * 对象转 Cookie 字符串
  */
 function buildCookie(obj) {
 
@@ -152,135 +98,278 @@ function buildCookie(obj) {
 
 
 /*
- * 合并 Cookie。
+ * 读取所有 Set-Cookie
  *
- * 旧 Cookie 保留，
- * 新请求中出现的同名 Cookie
- * 覆盖旧值。
+ * Loon 不同版本/场景下，
+ * Header 名大小写可能不同。
  */
-function mergeCookie(
-    oldCookie,
-    newCookie
-) {
+function getSetCookies(headers) {
 
-    const oldObj =
-        parseCookie(oldCookie);
+    if (!headers) {
+        return [];
+    }
 
-    const newObj =
-        parseCookie(newCookie);
+    const result = [];
 
-    Object.keys(newObj)
+    Object.keys(headers)
         .forEach(function (key) {
 
-            oldObj[key] =
-                newObj[key];
+            if (
+                key.toLowerCase() ===
+                "set-cookie"
+            ) {
+
+                const value =
+                    headers[key];
+
+                if (Array.isArray(value)) {
+
+                    value.forEach(
+                        function (v) {
+
+                            if (v) {
+                                result.push(
+                                    String(v)
+                                );
+                            }
+                        }
+                    );
+
+                } else if (value) {
+
+                    /*
+                     * 某些环境会把多条 Set-Cookie
+                     * 合并为一条。
+                     *
+                     * Discuz 的 Cookie 本身不包含
+                     * 需要保留的逗号值，所以这里做兼容。
+                     */
+                    String(value)
+                        .split(/,(?=\s*[^;,]+=)/)
+                        .forEach(
+                            function (v) {
+
+                                if (v.trim()) {
+                                    result.push(
+                                        v.trim()
+                                    );
+                                }
+                            }
+                        );
+                }
+            }
         });
 
-    return buildCookie(
-        oldObj
+    return result;
+}
+
+
+/*
+ * 从一条 Set-Cookie 中，
+ * 只取第一个 name=value。
+ */
+function parseSetCookie(line) {
+
+    if (!line) {
+        return null;
+    }
+
+    const first =
+        String(line)
+            .split(";")[0]
+            .trim();
+
+    const index =
+        first.indexOf("=");
+
+    if (index <= 0) {
+        return null;
+    }
+
+    return {
+        name:
+            first
+                .substring(
+                    0,
+                    index
+                )
+                .trim(),
+
+        value:
+            first
+                .substring(
+                    index + 1
+                )
+                .trim()
+    };
+}
+
+
+/*
+ * 判断是否是明确的删除 Cookie。
+ */
+function isDeletedCookie(value) {
+
+    const text =
+        String(value || "")
+            .toLowerCase();
+
+    return (
+        text === "deleted" ||
+        text === ""
     );
 }
 
 
 /*
- * 判断 Cookie 中是否存在
- * Discuz 登录认证相关 Cookie。
+ * 判断是否抓到了真正的登录 Cookie。
  *
- * 不绑定具体随机前缀。
+ * HAR 中登录成功后，
+ * 会下发类似：
  *
- * 常见登录 Cookie 名称中会出现：
- * *_auth
+ * naixi_xxxx_auth
+ * naixi_xxxx_ulastactivity
  *
- * 这里只判断 Cookie 名，
- * 不记录或打印具体认证值。
+ * 其中 *_auth 是最重要的登录认证字段。
  */
-function hasLoginCookie(cookie) {
+function hasAuthCookie(obj) {
 
-    const obj =
-        parseCookie(cookie);
+    return Object.keys(obj)
+        .some(function (key) {
 
-    const keys =
-        Object.keys(obj);
-
-    for (
-        let i = 0;
-        i < keys.length;
-        i++
-    ) {
-
-        const name =
-            keys[i]
-                .toLowerCase();
-
-        if (
-            name === "auth" ||
-            name.endsWith("_auth") ||
-            name.indexOf("auth") !== -1
-        ) {
-
-            if (
-                String(
-                    obj[keys[i]] || ""
-                ).length > 5
-            ) {
-
-                return true;
-            }
-        }
-    }
-
-    return false;
+            return (
+                /_auth$/i.test(key) &&
+                key.indexOf(
+                    "invite_auth"
+                ) === -1 &&
+                key.indexOf(
+                    "activationauth"
+                ) === -1 &&
+                obj[key] &&
+                !isDeletedCookie(
+                    obj[key]
+                )
+            );
+        });
 }
 
 
 /*
- * Cookie 是否完全一致。
+ * 合并旧 Cookie 和新的 Set-Cookie。
+ *
+ * 新 Cookie 优先。
+ * 遇到 deleted 则删除旧字段。
  */
-function cookieEqual(
-    a,
-    b
+function mergeCookies(
+    oldCookie,
+    setCookieLines
 ) {
 
-    const aObj =
-        parseCookie(a);
+    const merged =
+        parseCookieString(
+            oldCookie
+        );
 
-    const bObj =
-        parseCookie(b);
+    setCookieLines.forEach(
+        function (line) {
 
-    const aKeys =
-        Object.keys(aObj)
-            .sort();
+            const item =
+                parseSetCookie(
+                    line
+                );
 
-    const bKeys =
-        Object.keys(bObj)
-            .sort();
+            if (
+                !item ||
+                !item.name
+            ) {
+                return;
+            }
+
+            /*
+             * 只处理奶昔自己的 Cookie。
+             *
+             * 避免 Google Analytics
+             * 或其他第三方 Cookie 混进来。
+             */
+            if (
+                item.name
+                    .toLowerCase()
+                    .indexOf(
+                        "naixi_"
+                    ) !== 0
+            ) {
+                return;
+            }
+
+
+            if (
+                isDeletedCookie(
+                    item.value
+                )
+            ) {
+
+                delete merged[
+                    item.name
+                ];
+
+                return;
+            }
+
+
+            merged[
+                item.name
+            ] =
+                item.value;
+        }
+    );
+
+    return merged;
+}
+
+
+/*
+ * 判断两个 Cookie 是否一致
+ */
+function cookieEqual(a, b) {
+
+    const aa =
+        parseCookieString(a);
+
+    const bb =
+        parseCookieString(b);
+
+    const ak =
+        Object.keys(aa).sort();
+
+    const bk =
+        Object.keys(bb).sort();
 
     if (
-        aKeys.length !==
-        bKeys.length
+        ak.length !==
+        bk.length
     ) {
         return false;
     }
 
     for (
         let i = 0;
-        i < aKeys.length;
+        i < ak.length;
         i++
     ) {
 
         if (
-            aKeys[i] !==
-            bKeys[i]
+            ak[i] !==
+            bk[i]
         ) {
             return false;
         }
 
         if (
             String(
-                aObj[aKeys[i]]
+                aa[ak[i]]
             ) !==
             String(
-                bObj[bKeys[i]]
+                bb[bk[i]]
             )
         ) {
             return false;
@@ -296,35 +385,79 @@ function main() {
     try {
 
         if (
-            typeof $request ===
+            typeof $response ===
                 "undefined" ||
-            !$request
+            !$response
         ) {
 
             log(
-                "未发现请求对象"
+                "未检测到响应对象"
             );
 
             return;
         }
 
 
-        const incomingCookie =
-            getHeader(
-                $request.headers ||
-                {},
-                "Cookie"
+        if (
+            typeof $request ===
+                "undefined" ||
+            !$request
+        ) {
+
+            log(
+                "未检测到请求对象"
+            );
+
+            return;
+        }
+
+
+        const url =
+            String(
+                $request.url || ""
             );
 
 
         /*
-         * 请求本身没有 Cookie，
-         * 直接忽略。
+         * 双保险：
+         * 必须是真正的登录提交。
          */
-        if (!incomingCookie) {
+        if (
+            url.indexOf(
+                "member.php"
+            ) === -1 ||
+            url.indexOf(
+                "mod=logging"
+            ) === -1 ||
+            url.indexOf(
+                "action=login"
+            ) === -1 ||
+            url.indexOf(
+                "loginsubmit=yes"
+            ) === -1
+        ) {
 
             log(
-                "当前请求无 Cookie，忽略"
+                "不是登录提交响应，忽略"
+            );
+
+            return;
+        }
+
+
+        const setCookies =
+            getSetCookies(
+                $response.headers ||
+                {}
+            );
+
+
+        if (
+            !setCookies.length
+        ) {
+
+            log(
+                "登录响应未发现 Set-Cookie"
             );
 
             return;
@@ -337,52 +470,58 @@ function main() {
             ) || "";
 
 
-        /*
-         * 关键：
-         * 不直接覆盖。
-         *
-         * 将当前请求 Cookie
-         * 合并进原有 Cookie。
-         */
-        const mergedCookie =
-            mergeCookie(
+        const mergedObj =
+            mergeCookies(
                 oldCookie,
-                incomingCookie
+                setCookies
             );
 
 
         /*
-         * 如果合并后仍没有
-         * 登录认证 Cookie，
-         * 不写入。
-         *
-         * 防止 lastact 等普通 Cookie
-         * 被误当成登录 Cookie。
+         * 关键验证：
+         * 必须包含新的登录 auth Cookie。
          */
         if (
-            !hasLoginCookie(
-                mergedCookie
+            !hasAuthCookie(
+                mergedObj
             )
         ) {
 
             log(
-                "未检测到登录认证 Cookie，忽略"
+                "未检测到有效登录认证 Cookie"
+            );
+
+            notify(
+                "奶昔论坛",
+                "Cookie 获取失败",
+                "登录响应中未检测到有效认证信息"
             );
 
             return;
         }
 
 
-        /*
-         * 内容完全没变化：
-         * 不重复保存、
-         * 不重复通知。
-         */
+        const newCookie =
+            buildCookie(
+                mergedObj
+            );
+
+
+        if (!newCookie) {
+
+            log(
+                "生成 Cookie 失败"
+            );
+
+            return;
+        }
+
+
         if (
             oldCookie &&
             cookieEqual(
                 oldCookie,
-                mergedCookie
+                newCookie
             )
         ) {
 
@@ -394,19 +533,19 @@ function main() {
         }
 
 
-        const saved =
+        const ok =
             $persistentStore.write(
-                mergedCookie,
+                newCookie,
                 COOKIE_KEY
             );
 
 
         if (
-            saved === false
+            ok === false
         ) {
 
             log(
-                "Cookie 保存失败"
+                "Cookie 写入失败"
             );
 
             notify(
@@ -427,14 +566,14 @@ function main() {
         notify(
             "奶昔论坛",
             "Cookie 保存成功",
-            "登录状态已更新"
+            "新的登录状态已保存"
         );
 
 
     } catch (e) {
 
         log(
-            "捕获异常：" +
+            "异常：" +
             String(e)
         );
 
@@ -448,15 +587,21 @@ function main() {
 }
 
 
+/*
+ * 重点：
+ *
+ * 即使脚本报错，
+ * 也把原始 response 原样交还。
+ *
+ * 避免出现网页白屏。
+ */
 try {
 
     main();
 
 } finally {
 
-    /*
-     * http-request：
-     * 不修改原始请求。
-     */
-    $done({});
+    $done({
+        response: $response
+    });
 }
