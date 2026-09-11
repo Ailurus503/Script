@@ -1,46 +1,255 @@
 /*
- * 顺丰会员签到 - sessionId 自动捕获
- * 仅保存 mcs-mimp-web.sf-express.com 的 sessionId。
+ * 顺丰 Cookie 自动获取 V2
+ *
+ * 功能：
+ * 1. 捕获请求 Cookie
+ * 2. 捕获响应 Set-Cookie
+ * 3. 保存完整 Cookie
+ *
+ * 用于顺丰签到脚本
  */
 
-const KEY = "sfexpress_sessionid";
 
-function getHeader(headers, name) {
-  if (!headers) return "";
-  const target = name.toLowerCase();
-  for (const k of Object.keys(headers)) {
-    if (k.toLowerCase() === target) return String(headers[k] || "");
-  }
-  return "";
+const KEY = "sfexpress_cookie";
+
+
+function log(msg) {
+    console.log("[SF Cookie] " + msg);
 }
 
-function getCookieValue(cookie, name) {
-  const m = String(cookie || "").match(new RegExp("(?:^|;\\s*)" + name + "=([^;]+)", "i"));
-  return m ? m[1] : "";
+
+function notify(msg) {
+    $notification.post(
+        "顺丰签到",
+        "Cookie更新",
+        msg
+    );
 }
+
+
+/*
+ * 从 Cookie 字符串提取字段
+ */
+
+function extractCookie(text) {
+
+    if (!text) {
+        return "";
+    }
+
+
+    let cookies = [];
+
+
+    /*
+     * sessionId
+     */
+
+    let sid =
+        text.match(
+            /sessionId=[^;]+/i
+        );
+
+
+    if (sid) {
+        cookies.push(
+            sid[0]
+        );
+    }
+
+
+    /*
+     * JSESSIONID
+     */
+
+    let jsid =
+        text.match(
+            /JSESSIONID=[^;]+/i
+        );
+
+
+    if (jsid) {
+
+        cookies.push(
+            jsid[0]
+        );
+    }
+
+
+    /*
+     * token
+     */
+
+    let token =
+        text.match(
+            /token=[^;]+/i
+        );
+
+
+    if (token) {
+
+        cookies.push(
+            token[0]
+        );
+    }
+
+
+    return cookies.join("; ");
+}
+
+
 
 try {
-  const cookie = getHeader($request.headers, "Cookie");
-  const sid = getCookieValue(cookie, "sessionId");
 
-  if (!sid) {
-    console.log("[SF] 未在本次请求中发现 sessionId");
-    $done({});
-  } else {
-    const old = $persistentStore.read(KEY) || "";
-    const ok = $persistentStore.write(sid, KEY);
 
-    if (ok && sid !== old) {
-      console.log("[SF] sessionId 已更新");
-      $notification.post("顺丰签到", "登录凭据已更新", "已捕获新的 sessionId");
-    } else if (ok) {
-      console.log("[SF] sessionId 未变化");
-    } else {
-      console.log("[SF] sessionId 保存失败");
+    let cookie = "";
+
+
+    /*
+     * 1. 请求 Cookie
+     */
+
+    if ($request && $request.headers) {
+
+
+        let reqCookie =
+            $request.headers.Cookie ||
+            $request.headers.cookie;
+
+
+        if (reqCookie) {
+
+            cookie =
+                extractCookie(
+                    reqCookie
+                );
+
+
+            if (cookie) {
+
+                log(
+                    "请求Cookie发现：" +
+                    cookie
+                );
+            }
+        }
     }
-    $done({});
-  }
-} catch (e) {
-  console.log("[SF] 捕获异常: " + e);
-  $done({});
+
+
+
+    /*
+     * 2. 响应 Set-Cookie
+     */
+
+    if (!cookie &&
+        $response &&
+        $response.headers) {
+
+
+        let setCookie =
+            $response.headers[
+                "Set-Cookie"
+            ] ||
+            $response.headers[
+                "set-cookie"
+            ];
+
+
+        if (setCookie) {
+
+
+            if (
+                Array.isArray(
+                    setCookie
+                )
+            ) {
+
+                setCookie =
+                    setCookie.join("; ");
+            }
+
+
+            cookie =
+                extractCookie(
+                    setCookie
+                );
+
+
+            if (cookie) {
+
+                log(
+                    "响应Cookie发现：" +
+                    cookie
+                );
+            }
+        }
+    }
+
+
+
+    /*
+     * 保存
+     */
+
+    if (cookie) {
+
+
+        let old =
+            $persistentStore.read(
+                KEY
+            );
+
+
+        if (old !== cookie) {
+
+
+            let ok =
+                $persistentStore.write(
+                    cookie,
+                    KEY
+                );
+
+
+            if (ok) {
+
+                log(
+                    "Cookie保存成功"
+                );
+
+
+                notify(
+                    cookie
+                );
+            }
+
+        } else {
+
+            log(
+                "Cookie没有变化"
+            );
+        }
+
+
+    } else {
+
+
+        log(
+            "本次请求没有发现Cookie"
+        );
+
+    }
+
+
+
+} catch(e) {
+
+
+    log(
+        "异常：" +
+        e
+    );
+
 }
+
+
+$done();
