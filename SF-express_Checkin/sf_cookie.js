@@ -1,255 +1,134 @@
 /*
- * 顺丰 Cookie 自动获取 V2
- *
- * 功能：
- * 1. 捕获请求 Cookie
- * 2. 捕获响应 Set-Cookie
- * 3. 保存完整 Cookie
- *
- * 用于顺丰签到脚本
- */
-
+顺丰 Cookie 获取
+Loon Request Script
+*/
 
 const KEY = "sfexpress_cookie";
 
 
-function log(msg) {
+function log(msg){
     console.log("[SF Cookie] " + msg);
 }
 
 
-function notify(msg) {
-    $notification.post(
-        "顺丰签到",
-        "Cookie更新",
-        msg
-    );
-}
+function extract(cookie){
 
-
-/*
- * 从 Cookie 字符串提取字段
- */
-
-function extractCookie(text) {
-
-    if (!text) {
+    if(!cookie){
         return "";
     }
 
 
-    let cookies = [];
+    let arr=[];
 
-
-    /*
-     * sessionId
-     */
 
     let sid =
-        text.match(
-            /sessionId=[^;]+/i
-        );
+    cookie.match(
+        /sessionId=[^;]+/i
+    );
 
-
-    if (sid) {
-        cookies.push(
-            sid[0]
-        );
+    if(sid){
+        arr.push(sid[0]);
     }
 
 
-    /*
-     * JSESSIONID
-     */
+    let js =
+    cookie.match(
+        /JSESSIONID=[^;]+/i
+    );
 
-    let jsid =
-        text.match(
-            /JSESSIONID=[^;]+/i
-        );
-
-
-    if (jsid) {
-
-        cookies.push(
-            jsid[0]
-        );
+    if(js){
+        arr.push(js[0]);
     }
 
-
-    /*
-     * token
-     */
 
     let token =
-        text.match(
-            /token=[^;]+/i
-        );
+    cookie.match(
+        /token=[^;]+/i
+    );
 
-
-    if (token) {
-
-        cookies.push(
-            token[0]
-        );
+    if(token){
+        arr.push(token[0]);
     }
 
 
-    return cookies.join("; ");
+    return arr.join("; ");
 }
 
 
 
-try {
+try{
 
 
-    let cookie = "";
+    let cookie =
+    $request.headers.Cookie ||
+    $request.headers.cookie;
 
 
-    /*
-     * 1. 请求 Cookie
-     */
-
-    if ($request && $request.headers) {
-
-
-        let reqCookie =
-            $request.headers.Cookie ||
-            $request.headers.cookie;
-
-
-        if (reqCookie) {
-
-            cookie =
-                extractCookie(
-                    reqCookie
-                );
-
-
-            if (cookie) {
-
-                log(
-                    "请求Cookie发现：" +
-                    cookie
-                );
-            }
-        }
-    }
+    let result =
+    extract(cookie);
 
 
 
-    /*
-     * 2. 响应 Set-Cookie
-     */
-
-    if (!cookie &&
-        $response &&
-        $response.headers) {
-
-
-        let setCookie =
-            $response.headers[
-                "Set-Cookie"
-            ] ||
-            $response.headers[
-                "set-cookie"
-            ];
-
-
-        if (setCookie) {
-
-
-            if (
-                Array.isArray(
-                    setCookie
-                )
-            ) {
-
-                setCookie =
-                    setCookie.join("; ");
-            }
-
-
-            cookie =
-                extractCookie(
-                    setCookie
-                );
-
-
-            if (cookie) {
-
-                log(
-                    "响应Cookie发现：" +
-                    cookie
-                );
-            }
-        }
-    }
-
-
-
-    /*
-     * 保存
-     */
-
-    if (cookie) {
+    if(result){
 
 
         let old =
-            $persistentStore.read(
+        $persistentStore.read(KEY);
+
+
+
+        if(old !== result){
+
+
+            $persistentStore.write(
+                result,
                 KEY
             );
 
 
-        if (old !== cookie) {
+            log(
+                "保存成功:" +
+                result
+            );
 
 
-            let ok =
-                $persistentStore.write(
-                    cookie,
-                    KEY
-                );
+            $notification.post(
+                "顺丰签到",
+                "登录状态更新",
+                "Cookie已更新"
+            );
 
 
-            if (ok) {
+        }else{
 
-                log(
-                    "Cookie保存成功"
-                );
-
-
-                notify(
-                    cookie
-                );
-            }
-
-        } else {
 
             log(
-                "Cookie没有变化"
+                "Cookie无变化"
             );
+
         }
 
 
-    } else {
+    }else{
 
 
         log(
-            "本次请求没有发现Cookie"
+            "请求没有Cookie"
         );
 
     }
 
 
 
-} catch(e) {
+}catch(e){
 
 
     log(
-        "异常：" +
-        e
+        "异常:" + e
     );
 
 }
+
 
 
 $done();
