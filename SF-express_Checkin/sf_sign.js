@@ -1,13 +1,17 @@
 /*
  * 顺丰会员自动签到 - Loon
- * 修正版
+ * 修正版 V2
  *
- * 修正：
- * 1. POST Body 实际为 {}，不是 e30=
- * 2. 补齐顺丰 H5 接口主要请求头
- * 3. 同时发送 JSESSIONID + sessionId
- * 4. 自动查询今日签到状态
- * 5. 未签到才执行签到
+ * 原则：
+ * 保留第一版已经验证可以正常请求顺丰服务器的结构，
+ * 仅修正 HAR Body：
+ *
+ * HAR:
+ * encoding = base64
+ * text     = e30=
+ *
+ * 实际 HTTP Body：
+ * {}
  */
 
 const KEY = "sfexpress_sessionid";
@@ -16,126 +20,188 @@ const BASE =
   "https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/" +
   "~memberNonactivity~integralSignV2Service~";
 
+
+/* ==============================
+ * 通知
+ * ============================== */
+
 function notify(subtitle, message) {
-  $notification.post("顺丰签到", subtitle, message || "");
+  $notification.post(
+    "顺丰签到",
+    subtitle,
+    message || ""
+  );
 }
 
-function log(name, data) {
-  console.log("[SF] " + name + ": " + JSON.stringify(data));
-}
 
-/* Base64 解码 */
-function base64Decode(str) {
+/* ==============================
+ * Base64 解码
+ * ============================== */
+
+function base64ToBytes(input) {
+
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-  str = String(str || "")
-    .replace(/\s/g, "")
+  const clean = String(input || "")
+    .replace(/[\r\n\s]/g, "")
     .replace(/=+$/, "");
 
-  let output = [];
   let buffer = 0;
   let bits = 0;
 
-  for (let i = 0; i < str.length; i++) {
-    const value = chars.indexOf(str[i]);
+  const out = [];
 
-    if (value < 0) continue;
+  for (let i = 0; i < clean.length; i++) {
 
-    buffer = (buffer << 6) | value;
+    const v = chars.indexOf(clean[i]);
+
+    if (v < 0) {
+      continue;
+    }
+
+    buffer = (buffer << 6) | v;
     bits += 6;
 
     if (bits >= 8) {
+
       bits -= 8;
-      output.push((buffer >> bits) & 0xff);
+
+      out.push(
+        (buffer >> bits) & 0xff
+      );
     }
   }
 
-  return output;
+  return out;
 }
 
-/* UTF-8 解码 */
+
+/* ==============================
+ * UTF8 解码
+ * ============================== */
+
 function utf8Decode(bytes) {
-  let result = "";
 
-  for (let i = 0; i < bytes.length; ) {
-    const b1 = bytes[i++];
+  let s = "";
 
-    if (b1 < 0x80) {
-      result += String.fromCharCode(b1);
-    } else if ((b1 & 0xe0) === 0xc0) {
-      const b2 = bytes[i++] & 0x3f;
+  for (let i = 0; i < bytes.length;) {
 
-      result += String.fromCharCode(
-        ((b1 & 0x1f) << 6) | b2
+    const b0 = bytes[i++];
+
+    if (b0 < 0x80) {
+
+      s += String.fromCharCode(b0);
+
+    } else if ((b0 & 0xe0) === 0xc0) {
+
+      const b1 =
+        bytes[i++] & 0x3f;
+
+      s += String.fromCharCode(
+        ((b0 & 0x1f) << 6) |
+        b1
       );
-    } else if ((b1 & 0xf0) === 0xe0) {
-      const b2 = bytes[i++] & 0x3f;
-      const b3 = bytes[i++] & 0x3f;
 
-      result += String.fromCharCode(
-        ((b1 & 0x0f) << 12) |
-        (b2 << 6) |
-        b3
+    } else if ((b0 & 0xf0) === 0xe0) {
+
+      const b1 =
+        bytes[i++] & 0x3f;
+
+      const b2 =
+        bytes[i++] & 0x3f;
+
+      s += String.fromCharCode(
+        ((b0 & 0x0f) << 12) |
+        (b1 << 6) |
+        b2
       );
+
     } else {
-      const b2 = bytes[i++] & 0x3f;
-      const b3 = bytes[i++] & 0x3f;
-      const b4 = bytes[i++] & 0x3f;
+
+      const b1 =
+        bytes[i++] & 0x3f;
+
+      const b2 =
+        bytes[i++] & 0x3f;
+
+      const b3 =
+        bytes[i++] & 0x3f;
 
       let cp =
-        ((b1 & 0x07) << 18) |
-        (b2 << 12) |
-        (b3 << 6) |
-        b4;
+        ((b0 & 0x07) << 18) |
+        (b1 << 12) |
+        (b2 << 6) |
+        b3;
 
       cp -= 0x10000;
 
-      result += String.fromCharCode(
+      s += String.fromCharCode(
         0xd800 + (cp >> 10),
         0xdc00 + (cp & 0x3ff)
       );
     }
   }
 
-  return result;
+  return s;
 }
 
-/* 顺丰响应可能为 Base64，也可能直接 JSON */
+
+/* ==============================
+ * 解析返回
+ *
+ * 顺丰有时直接返回 JSON，
+ * 有时返回 Base64 JSON。
+ * ============================== */
+
 function parseResponse(data) {
-  if (!data) {
-    throw new Error("服务器返回空数据");
+
+  const raw =
+    String(data || "").trim();
+
+  if (!raw) {
+
+    throw new Error(
+      "服务器返回空内容"
+    );
   }
 
-  const raw = String(data).trim();
 
   /* 直接 JSON */
-  if (raw.startsWith("{") || raw.startsWith("[")) {
+
+  if (
+    raw.charAt(0) === "{" ||
+    raw.charAt(0) === "["
+  ) {
+
     return JSON.parse(raw);
   }
 
-  /* Base64 JSON */
-  const bytes = base64Decode(raw);
-  const decoded = utf8Decode(bytes);
+
+  /* Base64 */
+
+  const decoded =
+    utf8Decode(
+      base64ToBytes(raw)
+    );
 
   return JSON.parse(decoded);
 }
 
-function getHeaders(sessionId) {
+
+/* ==============================
+ * 请求头
+ *
+ * 保留第一版最小请求头。
+ * 不再乱加 channel/syscode 等。
+ * ============================== */
+
+function headers(sessionId) {
+
   return {
-    "Content-Type": "application/json",
 
-    "Accept":
-      "application/json, text/plain, */*",
-
-    "channel":
-      "autoappmy",
-
-    "syscode":
-      "MCS-MIMP-CORE",
-
-    "platform":
-      "SFAPP",
+    "Content-Type":
+      "application/json",
 
     "Origin":
       "https://mcs-mimp-web.sf-express.com",
@@ -149,83 +215,144 @@ function getHeaders(sessionId) {
       "Mobile/15E148 mediaCode=SFEXPRESSAPP-iOS-ML",
 
     "Cookie":
-      "JSESSIONID=" +
-      sessionId +
-      "; sessionId=" +
-      sessionId
+      "sessionId=" + sessionId
   };
 }
 
-function request(api, sessionId, callback) {
-  const options = {
-    url: BASE + api,
 
-    headers: getHeaders(sessionId),
+/* ==============================
+ * POST
+ * ============================== */
+
+function post(
+  api,
+  sessionId,
+  callback
+) {
+
+  const options = {
+
+    url:
+      BASE + api,
+
+    headers:
+      headers(sessionId),
 
     /*
      * 重点：
      *
-     * HAR 中：
-     *
-     * encoding: base64
-     * text: e30=
-     *
-     * 代表 HAR 把原始 {} 用 Base64 保存。
-     *
-     * 实际 HTTP Body 是：
-     *
-     * {}
+     * 这里必须是真正的 JSON：
      */
-    body: "{}",
-
-    timeout: 20
+    body:
+      "{}"
   };
 
-  console.log("[SF] POST " + api);
+
+  console.log(
+    "[SF] POST " + api
+  );
+
 
   $httpClient.post(
     options,
-    function(error, response, data) {
+    function(
+      error,
+      response,
+      data
+    ) {
+
+      /*
+       * 网络错误
+       */
+
       if (error) {
+
+        console.log(
+          "[SF] HTTP Error: " +
+          String(error)
+        );
+
         callback(
-          new Error("网络请求失败：" + error)
+          new Error(
+            "网络请求失败：" +
+            String(error)
+          )
         );
 
         return;
       }
 
+
+      /*
+       * HTTP 状态
+       */
+
       const status =
         response &&
-        (response.statusCode ||
-          response.status);
+        (
+          response.status ||
+          response.statusCode
+        );
+
+
+      console.log(
+        "[SF] HTTP Status: " +
+        status
+      );
+
 
       if (
         status &&
         Number(status) >= 400
       ) {
+
         callback(
-          new Error("HTTP " + status)
+          new Error(
+            "HTTP " + status
+          )
         );
 
         return;
       }
 
+
+      /*
+       * 打印原始响应
+       */
+
+      console.log(
+        "[SF] RAW: " +
+        String(data)
+      );
+
+
+      /*
+       * 解析响应
+       */
+
       try {
-        const obj =
+
+        const result =
           parseResponse(data);
 
-        log(api, obj);
-
-        callback(null, obj);
-      } catch (e) {
         console.log(
-          "[SF] 原始返回：" + data
+          "[SF] " +
+          api +
+          ": " +
+          JSON.stringify(result)
         );
+
+        callback(
+          null,
+          result
+        );
+
+      } catch (e) {
 
         callback(
           new Error(
             "返回解析失败：" +
-              e.message
+            e.message
           )
         );
       }
@@ -233,31 +360,51 @@ function request(api, sessionId, callback) {
   );
 }
 
-/* =========================
-   主程序
-   ========================= */
+
+/* =====================================
+ *
+ * 主程序
+ *
+ * ===================================== */
+
 
 const sessionId =
   $persistentStore.read(KEY);
 
+
+/* 没抓到 Cookie */
+
 if (!sessionId) {
+
   notify(
-    "没有登录凭据",
-    "请先打开顺丰 App → 进入会员签到页面，让 Loon 捕获 sessionId。"
+    "未获取登录凭据",
+    "请开启 Loon 后进入一次顺丰 App 会员签到页。"
   );
 
   $done();
+
 } else {
+
+
+  console.log(
+    "[SF] 已读取 sessionId"
+  );
+
+
   /*
-   * 第一步：
-   * 查询今天是否已经签到
+   * ① 查询今天签到状态
    */
 
-  request(
+  post(
     "getTodaySign",
     sessionId,
-    function(error, result) {
+    function(
+      error,
+      today
+    ) {
+
       if (error) {
+
         notify(
           "查询失败",
           error.message
@@ -268,85 +415,129 @@ if (!sessionId) {
         return;
       }
 
-      if (!result) {
-        notify(
-          "查询异常",
-          "服务器没有返回有效数据"
-        );
-
-        $done();
-
-        return;
-      }
-
-      if (result.success !== true) {
-        notify(
-          "查询失败",
-          result.errorMessage ||
-            result.message ||
-            "顺丰接口返回失败"
-        );
-
-        $done();
-
-        return;
-      }
-
-      if (!result.obj) {
-        notify(
-          "查询异常",
-          "接口没有返回签到状态"
-        );
-
-        $done();
-
-        return;
-      }
 
       /*
-       * 今天已经签到
+       * 顺丰返回失败
        */
 
-      if (result.obj.signed === true) {
-        const days =
-          result.obj.dayCount != null
-            ? result.obj.dayCount
-            : "?";
+      if (
+        !today ||
+        today.success !== true
+      ) {
 
-        const text =
-          result.obj.bubbleText || "";
+        const msg =
+          today &&
+          (
+            today.errorMessage ||
+            today.message
+          )
+            ?
+            (
+              today.errorMessage ||
+              today.message
+            )
+            :
+            "顺丰接口返回失败";
+
+
+        notify(
+          "查询失败",
+          msg
+        );
+
+
+        console.log(
+          "[SF] getTodaySign: " +
+          JSON.stringify(today)
+        );
+
+
+        $done();
+
+        return;
+      }
+
+
+      /*
+       * 没有 obj
+       */
+
+      if (!today.obj) {
+
+        notify(
+          "查询异常",
+          "服务器没有返回签到状态"
+        );
+
+        $done();
+
+        return;
+      }
+
+
+      /*
+       * ② 今天已经签到
+       */
+
+      if (
+        today.obj.signed === true
+      ) {
+
+        const days =
+          today.obj.dayCount != null
+            ?
+            today.obj.dayCount
+            :
+            "?";
+
+
+        const bubble =
+          today.obj.bubbleText || "";
+
 
         notify(
           "今日已签到",
+
           "连续签到 " +
-            days +
-            " 天" +
-            (text
-              ? "\n" + text
-              : "")
+          days +
+          " 天" +
+
+          (
+            bubble
+              ?
+              "\n" + bubble
+              :
+              ""
+          )
         );
+
 
         $done();
 
         return;
       }
 
+
       /*
-       * 今天尚未签到
+       * ③ 尚未签到
        */
 
       console.log(
-        "[SF] 今日尚未签到，开始签到"
+        "[SF] 今日未签到，开始执行签到"
       );
 
-      request(
+
+      post(
         "sign",
         sessionId,
         function(
           signError,
-          signResult
+          result
         ) {
+
+
           if (signError) {
+
             notify(
               "签到失败",
               signError.message
@@ -357,30 +548,52 @@ if (!sessionId) {
             return;
           }
 
+
+          /*
+           * 签到接口返回失败
+           */
+
           if (
-            !signResult ||
-            signResult.success !== true
+            !result ||
+            result.success !== true
           ) {
+
+            const msg =
+              result &&
+              (
+                result.errorMessage ||
+                result.message
+              )
+                ?
+                (
+                  result.errorMessage ||
+                  result.message
+                )
+                :
+                "服务器未返回成功状态";
+
+
             notify(
               "签到失败",
-              signResult &&
-              (signResult.errorMessage ||
-                signResult.message)
-                ? signResult.errorMessage ||
-                    signResult.message
-                : "服务器未返回签到成功"
+              msg
             );
+
 
             $done();
 
             return;
           }
 
+
+          /*
+           * 未返回 signed=true
+           */
+
           if (
-            !signResult.obj ||
-            signResult.obj.signed !==
-              true
+            !result.obj ||
+            result.obj.signed !== true
           ) {
+
             notify(
               "签到异常",
               "服务器没有返回 signed=true"
@@ -391,71 +604,66 @@ if (!sessionId) {
             return;
           }
 
+
           const obj =
-            signResult.obj;
+            result.obj;
+
 
           const days =
             obj.dayCount != null
-              ? obj.dayCount
-              : "?";
+              ?
+              obj.dayCount
+              :
+              "?";
 
-          let awardText = "";
+
+          let award = "";
+
 
           /*
-           * HAR 实际返回：
+           * HAR 中：
            *
-           * awardType: SFP
-           * awardNum: 2
+           * awardNum
+           * awardType = SFP
            */
 
           if (
             obj.awardNum != null
           ) {
-            awardText =
+
+            award =
               obj.awardNum +
-              (obj.awardType ===
-              "SFP"
-                ? " 积分"
-                : "");
+              (
+                obj.awardType === "SFP"
+                  ?
+                  " 积分"
+                  :
+                  ""
+              );
           }
+
 
           /*
-           * 兼容 award.productDTOList
+           * 签到成功
            */
-
-          if (
-            !awardText &&
-            obj.award &&
-            Array.isArray(
-              obj.award
-                .productDTOList
-            ) &&
-            obj.award
-              .productDTOList
-              .length > 0
-          ) {
-            const p =
-              obj.award
-                .productDTOList[0];
-
-            awardText =
-              (p.amount != null
-                ? p.amount + " "
-                : "") +
-              (p.productName ||
-                "");
-          }
 
           notify(
             "签到成功",
+
             "连续签到 " +
-              days +
-              " 天" +
-              (awardText
-                ? "\n获得：" +
-                  awardText
-                : "")
+            days +
+            " 天" +
+
+            (
+              award
+                ?
+                "\n获得：" +
+                award
+                :
+                ""
+            )
           );
+
 
           $done();
         }
