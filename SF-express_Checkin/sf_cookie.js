@@ -2,15 +2,17 @@
  * 顺丰签到 Cookie 捕获
  * Loon HTTP Request Script
  *
- * 只负责：
- * 1. 从 Request Cookie 获取 sessionId
- * 2. 保存到 Loon 持久化存储
- * 3. sessionId 变化时通知
+ * 仅建议匹配：
+ * https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/
+ * ~memberNonactivity~integralSignV2Service~...
  *
- * 不修改任何请求内容
+ * 功能：
+ * - 保存该签到服务真实请求携带的完整 Cookie
+ * - 不修改原始请求
+ * - 不输出 Cookie 内容到日志
  */
 
-const KEY = "sfexpress_sessionid";
+const KEY = "sfexpress_cookie";
 
 function getHeader(headers, name) {
     if (!headers) return "";
@@ -26,24 +28,7 @@ function getHeader(headers, name) {
     return "";
 }
 
-function getCookieValue(cookie, name) {
-    if (!cookie) return "";
-
-    const regex = new RegExp(
-        "(?:^|;\\s*)" + name + "=([^;]+)",
-        "i"
-    );
-
-    const match = cookie.match(regex);
-
-    return match ? match[1] : "";
-}
-
 try {
-
-    /*
-     * 读取 Request Cookie
-     */
 
     const cookie = getHeader(
         $request.headers,
@@ -53,97 +38,59 @@ try {
     if (!cookie) {
 
         console.log(
-            "[SF] 当前请求没有 Cookie"
+            "[SF] 当前签到请求没有 Cookie"
         );
 
         $done({});
 
     } else {
 
-        /*
-         * 提取 sessionId
-         */
+        const oldCookie =
+            $persistentStore.read(KEY) || "";
 
-        const sessionId = getCookieValue(
-            cookie,
-            "sessionId"
-        );
-
-        if (!sessionId) {
+        if (oldCookie === cookie) {
 
             console.log(
-                "[SF] 当前 Cookie 中没有 sessionId"
+                "[SF] 顺丰签到 Cookie 无变化"
             );
-
-            $done({});
 
         } else {
 
-            /*
-             * 读取旧值
-             */
-
-            const oldSessionId =
-                $persistentStore.read(KEY) || "";
-
-            /*
-             * sessionId 没变化
-             */
-
-            if (oldSessionId === sessionId) {
-
-                console.log(
-                    "[SF] sessionId 无变化"
+            const ok =
+                $persistentStore.write(
+                    cookie,
+                    KEY
                 );
 
-                $done({});
+            if (ok) {
+
+                console.log(
+                    "[SF] 顺丰签到 Cookie 已更新"
+                );
+
+                $notification.post(
+                    "顺丰签到",
+                    "登录状态已更新",
+                    "已获取签到接口最新 Cookie"
+                );
 
             } else {
 
-                /*
-                 * 保存新 sessionId
-                 */
-
-                const success =
-                    $persistentStore.write(
-                        sessionId,
-                        KEY
-                    );
-
-                if (success) {
-
-                    console.log(
-                        "[SF] sessionId 已更新"
-                    );
-
-                    $notification.post(
-                        "顺丰签到",
-                        "登录状态已更新",
-                        "已获取新的 sessionId"
-                    );
-
-                } else {
-
-                    console.log(
-                        "[SF] sessionId 保存失败"
-                    );
-                }
-
-                $done({});
+                console.log(
+                    "[SF] Cookie 保存失败"
+                );
             }
         }
+
+        $done({});
     }
 
-} catch (error) {
+} catch (e) {
 
     console.log(
         "[SF] Cookie捕获异常：" +
-        String(error)
+        String(e)
     );
-
-    /*
-     * 即使脚本异常，也不修改/阻断顺丰原始请求
-     */
 
     $done({});
 }
