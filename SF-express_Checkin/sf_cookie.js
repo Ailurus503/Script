@@ -1,5 +1,5 @@
-const KEY = "sfexpress_cookie";
-const UPDATE_KEY = "sfexpress_cookie_update_time";
+const COOKIE_KEY = "sfexpress_cookie";
+const SESSION_KEY = "sfexpress_sessionid";
 
 function getHeader(headers, name) {
   if (!headers) return "";
@@ -15,48 +15,66 @@ function getHeader(headers, name) {
   return "";
 }
 
-function hasUsefulCookie(cookie) {
-  if (!cookie) return false;
+function getCookieValue(cookie, name) {
+  if (!cookie) return "";
 
-  return (
-    cookie.indexOf("sessionId=") !== -1 ||
-    cookie.indexOf("JSESSIONID=") !== -1
-  );
+  const parts = cookie.split(";");
+
+  for (let i = 0; i < parts.length; i++) {
+    const item = parts[i].trim();
+    const pos = item.indexOf("=");
+
+    if (pos === -1) continue;
+
+    const key = item.substring(0, pos).trim();
+    const value = item.substring(pos + 1).trim();
+
+    if (key === name) {
+      return value;
+    }
+  }
+
+  return "";
 }
 
 try {
   const cookie = getHeader($request.headers, "Cookie");
 
-  if (!hasUsefulCookie(cookie)) {
+  if (!cookie) {
     $done({});
     return;
   }
 
-  const oldCookie = $persistentStore.read(KEY) || "";
+  const sessionId = getCookieValue(cookie, "sessionId");
 
-  if (oldCookie === cookie) {
-    console.log("[SF] Cookie 无变化");
+  // 没有 sessionId 的请求不作为有效登录状态
+  if (!sessionId) {
     $done({});
     return;
   }
 
-  const ok = $persistentStore.write(cookie, KEY);
+  const oldSessionId =
+    $persistentStore.read(SESSION_KEY) || "";
 
-  if (!ok) {
-    console.log("[SF] Cookie 保存失败");
+  // 始终保存最新完整 Cookie
+  $persistentStore.write(cookie, COOKIE_KEY);
+
+  // sessionId 没变化：静默更新，不通知
+  if (oldSessionId === sessionId) {
+    console.log("[SF] Cookie 已同步，sessionId 无变化");
     $done({});
     return;
   }
 
-  const now = String(Date.now());
-  $persistentStore.write(now, UPDATE_KEY);
+  // sessionId 真正变化
+  $persistentStore.write(sessionId, SESSION_KEY);
 
-  console.log("[SF] Cookie 已更新");
+  console.log("[SF] 新登录会话已捕获");
 
   $notification.post(
     "顺丰签到",
     "登录状态已更新",
-    "已获取新的顺丰会员登录状态"
+    "已获取新的顺丰会员登录会话"
   );
 
   $done({});
