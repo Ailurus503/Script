@@ -23,27 +23,24 @@ try {
     return;
   }
 
-  const oldCookie = $persistentStore.read(KEY);
+  const oldCookie = $persistentStore.read(KEY) || "";
 
-  // 已经存在 Cookie，不再覆盖
-  if (oldCookie) {
-    console.log("[SF] 已存在 Cookie，本次不覆盖");
-    $done({});
-    return;
-  }
-
-  const ok = $persistentStore.write(cookie, KEY);
-
-  if (ok) {
-    console.log("[SF] 首次 Cookie 捕获成功");
-
-    $notification.post(
-      "顺丰签到",
-      "Cookie 捕获成功",
-      "已锁定首次有效登录状态"
-    );
+  if (oldCookie === cookie) {
+    console.log("[SF] 顺丰 Cookie 无变化");
   } else {
-    console.log("[SF] Cookie 保存失败");
+    const ok = $persistentStore.write(cookie, KEY);
+
+    if (ok) {
+      console.log("[SF] 顺丰 Cookie 已更新");
+
+      $notification.post(
+        "顺丰签到",
+        "登录状态已更新",
+        "已获取最新 Cookie"
+      );
+    } else {
+      console.log("[SF] Cookie 保存失败");
+    }
   }
 
   $done({});
