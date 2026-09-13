@@ -1,7 +1,4 @@
-const KEY = "sfexpress_native_auth_v2";
-
-const URL =
-    "https://ucmp.sf-express.com/proxy/esgcempcore/memberNonactivity/integralSignV2Service/getTodaySign";
+const KEY = "sfexpress_native_auth_v21";
 
 function finish(title, subtitle, body) {
     $notification.post(title, subtitle, body);
@@ -9,9 +6,11 @@ function finish(title, subtitle, body) {
 }
 
 function addHeader(obj, name, value) {
-    if (value !== undefined &&
+    if (
+        value !== undefined &&
         value !== null &&
-        String(value).length > 0) {
+        String(value).length > 0
+    ) {
         obj[name] = String(value);
     }
 }
@@ -21,9 +20,9 @@ try {
 
     if (!raw) {
         finish(
-            "顺丰 V2",
+            "顺丰 V2.1",
             "没有认证信息",
-            "请先打开顺丰 App，让捕获脚本运行一次"
+            "请先打开顺丰 App 捕获一次 GET 请求"
         );
         return;
     }
@@ -34,14 +33,34 @@ try {
         auth = JSON.parse(raw);
     } catch (e) {
         finish(
-            "顺丰 V2",
+            "顺丰 V2.1",
             "认证数据损坏",
-            "请重新打开顺丰 App 捕获一次"
+            "请重新捕获"
         );
         return;
     }
 
-    const age = Date.now() - Number(auth.capturedAt || 0);
+    if (!auth.url) {
+        finish(
+            "顺丰 V2.1",
+            "缺少原请求 URL",
+            "请重新捕获"
+        );
+        return;
+    }
+
+    if ((auth.method || "").toUpperCase() !== "GET") {
+        finish(
+            "顺丰 V2.1",
+            "不是 GET 请求",
+            "请重新捕获"
+        );
+        return;
+    }
+
+    const age =
+        Date.now() -
+        Number(auth.capturedAt || 0);
 
     const headers = {};
 
@@ -55,35 +74,54 @@ try {
     addHeader(headers, "HSESSION", auth.hsession);
 
     addHeader(headers, "User-Agent", auth.userAgent);
-    addHeader(headers, "Accept", auth.accept || "application/json");
-    addHeader(headers, "Content-Type", auth.contentType);
+    addHeader(
+        headers,
+        "Accept",
+        auth.accept || "application/json"
+    );
 
+    addHeader(headers, "Content-Type", auth.contentType);
     addHeader(headers, "appversion", auth.appVersion);
     addHeader(headers, "osversion", auth.osVersion);
     addHeader(headers, "platform", auth.platform);
     addHeader(headers, "channel", auth.channel);
 
     console.log(
-        "[SF V2] 开始测试，认证信息年龄：" +
+        "[SF V2.1] 重放原始 GET"
+    );
+
+    console.log(
+        "[SF V2.1] 认证年龄：" +
         Math.round(age / 1000) +
         " 秒"
     );
 
+    // 日志只打印 URL，不打印任何 token
+    console.log(
+        "[SF V2.1] URL：" + auth.url
+    );
+
     $httpClient.get(
         {
-            url: URL,
+            url: auth.url,
             headers: headers,
             timeout: 15
         },
         function (error, response, data) {
 
             if (error) {
-                console.log("[SF V2] 网络错误：" + error);
+                console.log(
+                    "[SF V2.1] HTTPClient Error：" +
+                    String(error)
+                );
 
                 finish(
-                    "顺丰 V2",
-                    "请求失败",
-                    String(error)
+                    "顺丰 V2.1",
+                    "请求没有正常完成",
+                    String(error) +
+                    "\n认证年龄：" +
+                    Math.round(age / 1000) +
+                    " 秒"
                 );
                 return;
             }
@@ -93,81 +131,87 @@ try {
                     ? response.status
                     : "未知";
 
-            console.log("[SF V2] HTTP Status: " + status);
+            console.log(
+                "[SF V2.1] HTTP Status：" +
+                status
+            );
 
-            let obj;
+            if (!data) {
+                finish(
+                    "顺丰 V2.1",
+                    "收到空响应",
+                    "HTTP " +
+                    status +
+                    "\n认证年龄：" +
+                    Math.round(age / 1000) +
+                    " 秒"
+                );
+                return;
+            }
+
+            let obj = null;
 
             try {
                 obj = JSON.parse(data);
             } catch (e) {
-                console.log("[SF V2] 非 JSON 响应");
-
-                finish(
-                    "顺丰 V2",
-                    "服务器返回异常",
-                    "HTTP " + status
+                console.log(
+                    "[SF V2.1] 返回内容不是 JSON"
                 );
-                return;
             }
 
-            // 不把 token / requestsign 等信息打印出来
-            console.log(
-                "[SF V2] Response: " +
-                JSON.stringify(obj)
-            );
+            if (obj) {
+                console.log(
+                    "[SF V2.1] Response：" +
+                    JSON.stringify(obj)
+                );
 
-            if (obj.success === true) {
+                const msg =
+                    obj.errorMessage ||
+                    obj.message ||
+                    obj.msg ||
+                    "";
 
-                const info = obj.obj || {};
+                const code =
+                    obj.errorCode ||
+                    obj.code ||
+                    "";
 
-                let msg = "";
-
-                if (typeof info.signed !== "undefined") {
-                    msg +=
-                        "签到状态：" +
-                        (info.signed ? "已签到" : "未签到");
+                if (
+                    obj.success === true ||
+                    obj.status === true
+                ) {
+                    finish(
+                        "顺丰 V2.1",
+                        "原生认证可以重放",
+                        "HTTP " +
+                        status +
+                        "\n认证年龄：" +
+                        Math.round(age / 1000) +
+                        " 秒"
+                    );
+                    return;
                 }
 
-                if (info.dayCount !== undefined) {
-                    msg +=
-                        "\n连续签到：" +
-                        info.dayCount +
-                        " 天";
-                }
-
-                if (info.bubbleText) {
-                    msg += "\n" + info.bubbleText;
-                }
-
-                msg +=
+                finish(
+                    "顺丰 V2.1",
+                    "服务器已返回结果",
+                    "HTTP " +
+                    status +
+                    (code ? "\nCode：" + code : "") +
+                    (msg ? "\n" + msg : "") +
                     "\n认证年龄：" +
                     Math.round(age / 1000) +
-                    " 秒";
-
-                finish(
-                    "顺丰 V2",
-                    "原生认证复用成功",
-                    msg
+                    " 秒"
                 );
 
                 return;
             }
 
-            const errorCode =
-                obj.errorCode ||
-                obj.code ||
-                "";
-
-            const errorMessage =
-                obj.errorMessage ||
-                obj.message ||
-                "未知错误";
-
             finish(
-                "顺丰 V2",
-                "原生认证复用失败",
-                (errorCode ? errorCode + " · " : "") +
-                errorMessage +
+                "顺丰 V2.1",
+                "服务器已响应",
+                "HTTP " +
+                status +
                 "\n认证年龄：" +
                 Math.round(age / 1000) +
                 " 秒"
@@ -176,10 +220,12 @@ try {
     );
 
 } catch (e) {
-    console.log("[SF V2] 脚本异常：" + e);
+    console.log(
+        "[SF V2.1] 脚本异常：" + e
+    );
 
     finish(
-        "顺丰 V2",
+        "顺丰 V2.1",
         "脚本异常",
         String(e)
     );
