@@ -1,4 +1,4 @@
-const KEY = "sfexpress_native_auth_v2";
+const KEY = "sfexpress_native_auth_v21";
 
 function getHeader(headers, name) {
     const target = name.toLowerCase();
@@ -11,18 +11,26 @@ function getHeader(headers, name) {
 }
 
 try {
-    if (!$request || !$request.headers) {
-        console.log("[SF V2] 未获取到请求信息");
+    if (!$request || !$request.headers || !$request.url) {
+        console.log("[SF V2.1] 未获取到请求信息");
+        $done({});
+        return;
+    }
+
+    const method = ($request.method || "GET").toUpperCase();
+
+    // 这一版只测试 GET，避免 POST body 影响签名判断
+    if (method !== "GET") {
         $done({});
         return;
     }
 
     const src = $request.headers;
 
-    // 只保存可能与顺丰原生认证有关的请求头。
-    // 不在日志中输出任何真实值。
     const auth = {
         capturedAt: Date.now(),
+        url: $request.url,
+        method: method,
 
         token: getHeader(src, "token"),
         syttoken: getHeader(src, "syttoken"),
@@ -44,7 +52,7 @@ try {
     };
 
     if (!auth.token || !auth.requestsign || !auth.timeinterval) {
-        console.log("[SF V2] 当前请求未包含完整原生认证信息");
+        console.log("[SF V2.1] 当前 GET 未包含完整认证字段");
         $done({});
         return;
     }
@@ -55,18 +63,19 @@ try {
     );
 
     if (ok) {
-        console.log("[SF V2] 原生认证信息已更新");
+        console.log("[SF V2.1] 已捕获一组 GET 原生认证");
+
         $notification.post(
-            "顺丰 V2",
-            "原生认证已捕获",
-            "现在可以立即运行 V2 测试脚本"
+            "顺丰 V2.1",
+            "原生 GET 认证已捕获",
+            "请立即运行 V2.1 测试脚本"
         );
     } else {
-        console.log("[SF V2] 保存失败");
+        console.log("[SF V2.1] 保存认证失败");
     }
 
 } catch (e) {
-    console.log("[SF V2] 捕获异常：" + e);
+    console.log("[SF V2.1] 捕获异常：" + e);
 }
 
 $done({});
