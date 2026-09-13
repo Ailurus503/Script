@@ -16,7 +16,7 @@ if (!cookie) {
   return;
 }
 
-function headers() {
+function getHeaders() {
   return {
     "Content-Type": "application/json",
     "Accept": "application/json, text/plain, */*",
@@ -31,41 +31,44 @@ function headers() {
 function post(api, callback) {
   const options = {
     url: BASE + api,
-    headers: headers(),
-
-    // HAR 中显示 e30= 是因为 HAR 使用了 Base64 编码。
-    // 实际请求体必须是 {}
+    headers: getHeaders(),
     body: "{}"
   };
 
   $httpClient.post(options, function (error, response, data) {
     if (error) {
-      callback(error, null, response);
+      callback(error, null);
       return;
     }
 
     console.log(
-      "[SF] HTTP Status: " +
-        (response ? response.status : "unknown")
+      "[SF] " +
+      api +
+      " HTTP " +
+      (response ? response.status : "unknown")
     );
 
     console.log("[SF] " + api + ": " + data);
 
     try {
-      const json = JSON.parse(data);
-      callback(null, json, response);
+      callback(null, JSON.parse(data));
     } catch (e) {
-      callback("JSON 解析失败：" + e, null, response);
+      callback("JSON 解析失败：" + e, null);
     }
   });
 }
 
-function finish(title, subtitle, message) {
-  $notification.post(title, subtitle, message);
+function finish(subtitle, message) {
+  $notification.post(
+    "顺丰签到",
+    subtitle,
+    message
+  );
+
   $done();
 }
 
-function getErrorMessage(data) {
+function getMsg(data) {
   if (!data) return "";
 
   return (
@@ -76,16 +79,23 @@ function getErrorMessage(data) {
   );
 }
 
+function isLoginExpired(data) {
+  if (!data) return false;
 
-// ==============================
-// 查询今天是否已经签到
-// ==============================
+  const msg = getMsg(data);
 
+  return (
+    String(data.errorCode || "") === "100111" ||
+    msg.indexOf("用户信息失效") !== -1
+  );
+}
+
+
+// 查询签到状态
 post("getTodaySign", function (error, data) {
 
   if (error) {
     finish(
-      "顺丰签到",
       "查询失败",
       String(error)
     );
@@ -94,163 +104,108 @@ post("getTodaySign", function (error, data) {
 
   if (!data) {
     finish(
-      "顺丰签到",
       "查询失败",
       "接口没有返回有效数据"
     );
     return;
   }
 
-
-  // ==============================
-  // Cookie / 登录状态失效
-  // ==============================
-
   if (data.success === false) {
 
-    const msg = getErrorMessage(data);
-
-    if (
-      msg.indexOf("用户信息失效") !== -1 ||
-      data.errorCode === "100111"
-    ) {
+    if (isLoginExpired(data)) {
       finish(
-        "顺丰签到",
         "登录状态失效",
-        "请打开一次顺丰 App 会员签到页，Loon 会自动更新 Cookie。"
+        "请打开一次顺丰 App → 会员签到页，登录状态会自动更新。"
       );
-
       return;
     }
 
     finish(
-      "顺丰签到",
       "查询失败",
-      msg || "未知错误"
+      getMsg(data) || "未知错误"
     );
 
     return;
   }
-
 
   const obj = data.obj || {};
 
-
-  // ==============================
-  // 今天已经签到
-  // ==============================
-
   if (obj.signed === true) {
 
-    const dayCount =
-      obj.dayCount !== undefined
-        ? obj.dayCount
-        : "-";
+    let text =
+      "连续签到 " +
+      (obj.dayCount !== undefined ? obj.dayCount : "-") +
+      " 天";
 
-    const bubbleText =
-      obj.bubbleText || "";
+    if (obj.bubbleText) {
+      text += "\n" + obj.bubbleText;
+    }
 
     finish(
-      "顺丰签到",
       "今日已签到",
-      "连续签到 " +
-        dayCount +
-        " 天" +
-        (bubbleText ? "\n" + bubbleText : "")
+      text
     );
 
     return;
   }
 
 
-  // ==============================
-  // 今天未签到，开始签到
-  // ==============================
-
+  // 未签到，执行签到
   post("sign", function (error2, signData) {
 
     if (error2) {
       finish(
-        "顺丰签到",
         "签到失败",
         String(error2)
       );
-
       return;
     }
 
     if (!signData) {
       finish(
-        "顺丰签到",
         "签到失败",
         "接口没有返回有效数据"
       );
-
       return;
     }
 
-
     if (signData.success === false) {
 
-      const msg = getErrorMessage(signData);
-
-      if (
-        msg.indexOf("用户信息失效") !== -1 ||
-        signData.errorCode === "100111"
-      ) {
+      if (isLoginExpired(signData)) {
         finish(
-          "顺丰签到",
           "登录状态失效",
-          "请打开一次顺丰 App 会员签到页，Loon 会自动更新 Cookie。"
+          "请打开一次顺丰 App → 会员签到页，登录状态会自动更新。"
         );
-
         return;
       }
 
       finish(
-        "顺丰签到",
         "签到失败",
-        msg || "未知错误"
+        getMsg(signData) || "未知错误"
       );
 
       return;
     }
 
+    const obj2 = signData.obj || {};
 
-    const signObj = signData.obj || {};
+    let text =
+      "连续签到 " +
+      (obj2.dayCount !== undefined ? obj2.dayCount : "-") +
+      " 天";
 
-    const dayCount =
-      signObj.dayCount !== undefined
-        ? signObj.dayCount
-        : "-";
+    if (obj2.awardNum !== undefined) {
 
-    const awardNum =
-      signObj.awardNum !== undefined
-        ? signObj.awardNum
-        : "";
-
-    const awardType =
-      signObj.awardType || "";
-
-
-    let awardText = "";
-
-    if (awardNum !== "") {
-      if (awardType === "SFP") {
-        awardText = "\n获得 " + awardNum + " 积分";
+      if (obj2.awardType === "SFP") {
+        text += "\n获得 " + obj2.awardNum + " 积分";
       } else {
-        awardText = "\n获得奖励：" + awardNum;
+        text += "\n获得奖励：" + obj2.awardNum;
       }
     }
 
-
     finish(
-      "顺丰签到",
       "签到成功",
-      "连续签到 " +
-        dayCount +
-        " 天" +
-        awardText
+      text
     );
   });
 });
