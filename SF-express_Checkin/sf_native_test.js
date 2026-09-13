@@ -105,7 +105,6 @@ try {
         {
             url: auth.url,
             headers: headers,
-            timeout: 15
         },
         function (error, response, data) {
 
