@@ -518,7 +518,7 @@
 
         const title = signedNow
             ? '签到成功🎉'
-            : '今日已签到';
+            : '今日已签到🎉';
 
         const lines = [];
 
