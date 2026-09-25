@@ -1,14 +1,28 @@
 /*
- * Vae+ 请求捕获 / 持久化 - Surge
+ * Vae+ 授权 / 请求模板捕获
+ * Surge 单 http-request 版本
  *
- * 同一个脚本同时用于：
- * 1. http-request：暂存请求 URL / Header / Body
- * 2. http-response：根据响应 requestVar 判断接口类型并保存模板
+ * Surge 配置：
  *
- * Surge 必须：
- * - http-request requires-body=true
- * - http-response requires-body=true
- * - MITM api1.starfans.com
+ * Vae+ 授权获取 = type=http-request, pattern=^https:\/\/api1\.starfans\.com\/auth\/, requires-body=true, script-path=你的脚本地址, timeout=10, debug=true
+ *
+ * MITM：
+ *
+ * hostname = %APPEND% api1.starfans.com
+ *
+ * 持久化模板：
+ *
+ * VAE_STATUS_REQUEST
+ *   /USER_HOME/getRecord.json
+ *
+ * VAE_SIGN_REQUEST
+ *   /USER_HOME/getRecordByMonth.json
+ *
+ * VAE_TASK_LIST_REQUEST
+ *   /GAME/getTaskList.json
+ *
+ * VAE_DAILY_REWARD_REQUEST
+ *   /GAME/completeTask.json + taskKey=201
  */
 
 const STATUS_KEY = "VAE_STATUS_REQUEST";
@@ -16,28 +30,19 @@ const SIGN_KEY = "VAE_SIGN_REQUEST";
 const TASK_LIST_KEY = "VAE_TASK_LIST_REQUEST";
 const DAILY_REWARD_KEY = "VAE_DAILY_REWARD_REQUEST";
 
-const PENDING_PREFIX = "VAE_PENDING_";
-
 
 function log(message) {
-    console.log("[Vae+ Auth] " + message);
+    console.log(
+        "[Vae+ Auth] " + message
+    );
 }
 
 
 function finish() {
-    // Surge 中 $done({}) 表示请求/响应保持不变
+    /*
+     * 不修改原始请求。
+     */
     $done({});
-}
-
-
-function parseJSON(text) {
-    if (!text) return null;
-
-    try {
-        return JSON.parse(text);
-    } catch (e) {
-        return null;
-    }
 }
 
 
@@ -45,6 +50,11 @@ function readStore(key) {
     try {
         return $persistentStore.read(key);
     } catch (e) {
+        log(
+            "读取持久化数据失败：" +
+            String(e)
+        );
+
         return null;
     }
 }
@@ -57,94 +67,11 @@ function writeStore(key, value) {
             key
         );
     } catch (e) {
-        return false;
-    }
-}
-
-
-function deleteStore(key) {
-    try {
-        return $persistentStore.write(
-            null,
-            key
+        log(
+            "写入持久化数据失败：" +
+            String(e)
         );
-    } catch (e) {
-        return false;
-    }
-}
 
-
-function cleanHeaders(headers) {
-    const result = {};
-
-    if (!headers) return result;
-
-    Object.keys(headers).forEach(function (key) {
-        const lower = key.toLowerCase();
-
-        if (
-            lower === "content-length" ||
-            lower === "host" ||
-            lower === "connection" ||
-            lower === "accept-encoding"
-        ) {
-            return;
-        }
-
-        result[key] = headers[key];
-    });
-
-    return result;
-}
-
-
-function getPendingKey() {
-    if (
-        typeof $request === "undefined" ||
-        !$request ||
-        !$request.id
-    ) {
-        return "";
-    }
-
-    const id = String($request.id)
-        .replace(/[^A-Za-z0-9_.-]/g, "_");
-
-    return PENDING_PREFIX + id;
-}
-
-
-function normalizeTemplate(template) {
-    if (!template) return null;
-
-    return {
-        action: template.action || "",
-        url: template.url || "",
-        method: (
-            template.method ||
-            "POST"
-        ).toUpperCase(),
-        headers: template.headers || {},
-        body: template.body || ""
-    };
-}
-
-
-function templatesEqual(oldTemplate, newTemplate) {
-    if (!oldTemplate || !newTemplate) {
-        return false;
-    }
-
-    try {
-        return (
-            JSON.stringify(
-                normalizeTemplate(oldTemplate)
-            ) ===
-            JSON.stringify(
-                normalizeTemplate(newTemplate)
-            )
-        );
-    } catch (e) {
         return false;
     }
 }
@@ -153,7 +80,9 @@ function templatesEqual(oldTemplate, newTemplate) {
 function readTemplate(key) {
     const raw = readStore(key);
 
-    if (!raw) return null;
+    if (!raw) {
+        return null;
+    }
 
     try {
         return JSON.parse(raw);
@@ -163,97 +92,481 @@ function readTemplate(key) {
 }
 
 
-function saveTemplate(
-    key,
-    template,
-    notifyChange,
-    notifySubtitle,
-    notifyBody
-) {
-    if (!template) return false;
+function cleanHeaders(headers) {
+    const result = {};
 
-    const oldTemplate =
-        readTemplate(key);
-
-    const changed =
-        !templatesEqual(
-            oldTemplate,
-            template
-        );
-
-    const success =
-        writeStore(
-            key,
-            JSON.stringify(template)
-        );
-
-    if (!success) {
-        log(
-            template.action +
-            "：持久化失败"
-        );
-
-        return false;
+    if (!headers) {
+        return result;
     }
 
-    log(
-        "已保存：" +
-        template.action
-    );
+    Object.keys(headers)
+        .sort(function (a, b) {
+            return a
+                .toLowerCase()
+                .localeCompare(
+                    b.toLowerCase()
+                );
+        })
+        .forEach(function (key) {
 
-    log(
-        "Body length: " +
-        String(
-            template.body || ""
-        ).length
-    );
+            const lower =
+                key.toLowerCase();
 
-    if (
-        notifyChange &&
-        changed
-    ) {
-        $notification.post(
-            "Vae+ 授权更新",
-            notifySubtitle || "",
-            notifyBody || ""
-        );
+            /*
+             * 这些 Header 重放时不应该固定保存。
+             */
+            if (
+                lower === "content-length" ||
+                lower === "host" ||
+                lower === "connection" ||
+                lower === "accept-encoding"
+            ) {
+                return;
+            }
+
+            result[key] =
+                headers[key];
+        });
+
+    return result;
+}
+
+
+function safeDecode(text) {
+    if (!text) {
+        return "";
     }
 
-    return true;
+    try {
+        return decodeURIComponent(
+            String(text)
+                .replace(
+                    /\+/g,
+                    "%20"
+                )
+        );
+    } catch (e) {
+        return String(text);
+    }
+}
+
+
+function parseJSON(text) {
+    if (!text) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        return null;
+    }
 }
 
 
 /*
- * 第一阶段：
- * http-request
+ * 递归展开 JSON。
  *
- * Surge 的 response script 不提供 request body，
- * 因此先在这里暂存。
+ * 用来兼容接口名位于：
+ * - JSON 字段
+ * - 嵌套 JSON
+ * - 数组
+ *
+ * 中的情况。
  */
-function captureRequest() {
-    const pendingKey =
-        getPendingKey();
+function flattenJSON(
+    value,
+    output
+) {
+    output =
+        output || [];
 
-    if (!pendingKey) {
-        log("缺少 request.id");
-        return;
+    if (
+        value === null ||
+        value === undefined
+    ) {
+        return output;
     }
 
+    if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+    ) {
+        output.push(
+            String(value)
+        );
+
+        return output;
+    }
+
+    if (Array.isArray(value)) {
+
+        value.forEach(
+            function (item) {
+                flattenJSON(
+                    item,
+                    output
+                );
+            }
+        );
+
+        return output;
+    }
+
+    if (
+        typeof value === "object"
+    ) {
+
+        Object.keys(value)
+            .forEach(
+                function (key) {
+
+                    output.push(
+                        String(key)
+                    );
+
+                    flattenJSON(
+                        value[key],
+                        output
+                    );
+                }
+            );
+    }
+
+    return output;
+}
+
+
+/*
+ * 生成用于接口识别的文本。
+ *
+ * 同时检查：
+ * - URL
+ * - URL Decode 后的 URL
+ * - Body
+ * - URL Decode 后的 Body
+ * - JSON 展开内容
+ */
+function buildSearchText() {
+
+    const parts = [];
+
+    const url =
+        (
+            typeof $request !==
+                "undefined" &&
+            $request &&
+            $request.url
+        )
+            ? String(
+                $request.url
+            )
+            : "";
+
     const body =
-        typeof $request.body === "string"
+        (
+            typeof $request !==
+                "undefined" &&
+            $request &&
+            typeof $request.body ===
+                "string"
+        )
             ? $request.body
             : "";
 
-    if (!body) {
-        log("请求 Body 为空");
-        return;
+    parts.push(url);
+    parts.push(body);
+
+    parts.push(
+        safeDecode(url)
+    );
+
+    parts.push(
+        safeDecode(body)
+    );
+
+
+    /*
+     * 尝试把 Body 当 JSON 解析。
+     */
+    const json =
+        parseJSON(body);
+
+    if (json) {
+
+        const flattened =
+            flattenJSON(
+                json
+            );
+
+        parts.push(
+            flattened.join("\n")
+        );
     }
 
-    const pending = {
-        version: 6,
+
+    /*
+     * URL Decode 后再尝试解析 JSON。
+     */
+    const decodedBody =
+        safeDecode(body);
+
+    if (
+        decodedBody &&
+        decodedBody !== body
+    ) {
+
+        const decodedJSON =
+            parseJSON(
+                decodedBody
+            );
+
+        if (decodedJSON) {
+
+            const flattened =
+                flattenJSON(
+                    decodedJSON
+                );
+
+            parts.push(
+                flattened.join("\n")
+            );
+        }
+    }
+
+
+    return parts.join("\n");
+}
+
+
+/*
+ * 判断 taskKey=201。
+ */
+function containsTask201(text) {
+
+    if (!text) {
+        return false;
+    }
+
+    return (
+        text.indexOf(
+            "taskKey=201"
+        ) !== -1 ||
+
+        text.indexOf(
+            "taskKey%3D201"
+        ) !== -1 ||
+
+        text.indexOf(
+            "\"taskKey\":201"
+        ) !== -1 ||
+
+        text.indexOf(
+            "\"taskKey\":\"201\""
+        ) !== -1 ||
+
+        text.indexOf(
+            "'taskKey':201"
+        ) !== -1 ||
+
+        text.indexOf(
+            "'taskKey':'201'"
+        ) !== -1 ||
+
+        /taskKey[\s:=&"']+201/i
+            .test(text)
+    );
+}
+
+
+/*
+ * 识别请求类型。
+ */
+function detectAction() {
+
+    const text =
+        buildSearchText();
+
+    if (!text) {
+
+        log(
+            "请求 URL 和 Body 均为空"
+        );
+
+        return null;
+    }
+
+
+    /*
+     * 每日登录奖励
+     *
+     * completeTask 必须最优先判断。
+     */
+    if (
+        text.indexOf(
+            "/GAME/completeTask.json"
+        ) !== -1 &&
+        containsTask201(text)
+    ) {
+
+        return {
+
+            key:
+                DAILY_REWARD_KEY,
+
+            action:
+                "/GAME/completeTask.json&taskKey=201",
+
+            notify:
+                true,
+
+            subtitle:
+                "每日登录奖励请求已保存",
+
+            notifyBody:
+                "taskKey=201"
+        };
+    }
+
+
+    /*
+     * 每日任务列表
+     */
+    if (
+        text.indexOf(
+            "/GAME/getTaskList.json"
+        ) !== -1
+    ) {
+
+        return {
+
+            key:
+                TASK_LIST_KEY,
+
+            action:
+                "/GAME/getTaskList.json",
+
+            notify:
+                false
+        };
+    }
+
+
+    /*
+     * 每月签到接口
+     *
+     * 必须放在 getRecord 前面，
+     * 避免被 getRecord 误匹配。
+     */
+    if (
+        text.indexOf(
+            "/USER_HOME/getRecordByMonth.json"
+        ) !== -1
+    ) {
+
+        return {
+
+            key:
+                SIGN_KEY,
+
+            action:
+                "/USER_HOME/getRecordByMonth.json",
+
+            notify:
+                true,
+
+            subtitle:
+                "签到请求已更新",
+
+            notifyBody:
+                "getRecordByMonth"
+        };
+    }
+
+
+    /*
+     * 签到状态接口
+     */
+    if (
+        text.indexOf(
+            "/USER_HOME/getRecord.json"
+        ) !== -1
+    ) {
+
+        return {
+
+            key:
+                STATUS_KEY,
+
+            action:
+                "/USER_HOME/getRecord.json",
+
+            notify:
+                false
+        };
+    }
+
+
+    return null;
+}
+
+
+/*
+ * 构造可供自动签到脚本重放的请求模板。
+ */
+function buildTemplate(action) {
+
+    if (
+        typeof $request ===
+            "undefined" ||
+        !$request
+    ) {
+
+        log(
+            action +
+            "：不存在 $request"
+        );
+
+        return null;
+    }
+
+
+    const body =
+        typeof $request.body ===
+            "string"
+            ? $request.body
+            : "";
+
+
+    if (!body) {
+
+        log(
+            action +
+            "：请求 Body 为空"
+        );
+
+        return null;
+    }
+
+
+    const headers =
+        cleanHeaders(
+            $request.headers ||
+            {}
+        );
+
+
+    return {
+
+        version: 7,
+
+        action:
+            action,
 
         url:
-            $request.url || "",
+            $request.url ||
+            "",
 
         method:
             (
@@ -262,240 +575,279 @@ function captureRequest() {
             ).toUpperCase(),
 
         headers:
-            cleanHeaders(
-                $request.headers || {}
-            ),
+            headers,
 
-        body: body,
+        body:
+            body,
 
         updateTime:
             Date.now()
     };
+}
+
+
+/*
+ * updateTime 不参与模板变化判断。
+ */
+function normalizeTemplate(
+    template
+) {
+
+    if (!template) {
+        return null;
+    }
+
+
+    return {
+
+        action:
+            template.action ||
+            "",
+
+        url:
+            template.url ||
+            "",
+
+        method:
+            (
+                template.method ||
+                "POST"
+            ).toUpperCase(),
+
+        headers:
+            template.headers ||
+            {},
+
+        body:
+            template.body ||
+            ""
+    };
+}
+
+
+function templatesEqual(
+    oldTemplate,
+    newTemplate
+) {
+
+    if (
+        !oldTemplate ||
+        !newTemplate
+    ) {
+        return false;
+    }
+
+
+    try {
+
+        return (
+            JSON.stringify(
+                normalizeTemplate(
+                    oldTemplate
+                )
+            ) ===
+            JSON.stringify(
+                normalizeTemplate(
+                    newTemplate
+                )
+            )
+        );
+
+    } catch (e) {
+
+        return false;
+    }
+}
+
+
+/*
+ * 保存请求模板。
+ */
+function saveTemplate(
+    info,
+    template
+) {
+
+    if (
+        !info ||
+        !template
+    ) {
+        return false;
+    }
+
+
+    const oldTemplate =
+        readTemplate(
+            info.key
+        );
+
+
+    const changed =
+        !templatesEqual(
+            oldTemplate,
+            template
+        );
+
 
     const success =
         writeStore(
-            pendingKey,
-            JSON.stringify(pending)
+            info.key,
+            JSON.stringify(
+                template
+            )
         );
 
-    if (success) {
+
+    if (!success) {
+
         log(
-            "已暂存请求：" +
-            $request.id
+            template.action +
+            "：持久化失败"
         );
-    } else {
-        log("暂存请求失败");
+
+        return false;
     }
+
+
+    log(
+        "已保存：" +
+        template.action
+    );
+
+
+    log(
+        "Method: " +
+        template.method
+    );
+
+
+    log(
+        "Body length: " +
+        template.body.length
+    );
+
+
+    /*
+     * 状态查询、任务列表：
+     * 静默更新。
+     *
+     * 签到、每日登录奖励：
+     * 首次捕获或内容变化时通知。
+     */
+    if (
+        info.notify &&
+        changed
+    ) {
+
+        $notification.post(
+            "Vae+ 授权更新",
+            info.subtitle ||
+                "",
+            info.notifyBody ||
+                ""
+        );
+    }
+
+
+    if (
+        info.notify &&
+        !changed
+    ) {
+
+        log(
+            template.action +
+            "：模板未变化，静默更新"
+        );
+    }
+
+
+    return true;
 }
 
 
 /*
- * 从响应中获取真实接口动作。
+ * 主程序。
  */
-function getRequestVar() {
-    if (
-        typeof $response === "undefined" ||
-        !$response ||
-        typeof $response.body !== "string"
-    ) {
-        return "";
-    }
-
-    const json =
-        parseJSON(
-            $response.body
-        );
-
-    if (!json) return "";
-
-    return typeof json.requestVar === "string"
-        ? json.requestVar
-        : "";
-}
-
-
-function getActionInfo(requestVar) {
-    if (!requestVar) return null;
-
-    // completeTask 必须优先
-    if (
-        requestVar.indexOf(
-            "/GAME/completeTask.json"
-        ) !== -1 &&
-        requestVar.indexOf(
-            "taskKey=201"
-        ) !== -1
-    ) {
-        return {
-            key: DAILY_REWARD_KEY,
-            action:
-                "/GAME/completeTask.json&taskKey=201",
-            notify: true,
-            subtitle:
-                "每日登录奖励请求已保存",
-            body:
-                "taskKey=201"
-        };
-    }
-
-    if (
-        requestVar.indexOf(
-            "/GAME/getTaskList.json"
-        ) !== -1
-    ) {
-        return {
-            key: TASK_LIST_KEY,
-            action:
-                "/GAME/getTaskList.json",
-            notify: false
-        };
-    }
-
-    // getRecordByMonth 必须在 getRecord 之前
-    if (
-        requestVar.indexOf(
-            "/USER_HOME/getRecordByMonth.json"
-        ) !== -1
-    ) {
-        return {
-            key: SIGN_KEY,
-            action:
-                "/USER_HOME/getRecordByMonth.json",
-            notify: true,
-            subtitle:
-                "签到请求已更新",
-            body:
-                "getRecordByMonth"
-        };
-    }
-
-    if (
-        requestVar.indexOf(
-            "/USER_HOME/getRecord.json"
-        ) !== -1
-    ) {
-        return {
-            key: STATUS_KEY,
-            action:
-                "/USER_HOME/getRecord.json",
-            notify: false
-        };
-    }
-
-    return null;
-}
-
-
-/*
- * 第二阶段：
- * http-response
- */
-function captureResponse() {
-    const requestVar =
-        getRequestVar();
-
-    if (!requestVar) {
-        return;
-    }
-
-    const actionInfo =
-        getActionInfo(
-            requestVar
-        );
-
-    if (!actionInfo) {
-        return;
-    }
-
-    const pendingKey =
-        getPendingKey();
-
-    if (!pendingKey) {
-        log(
-            actionInfo.action +
-            "：无法取得 request.id"
-        );
-        return;
-    }
-
-    const raw =
-        readStore(
-            pendingKey
-        );
-
-    if (!raw) {
-        log(
-            actionInfo.action +
-            "：未找到对应请求缓存"
-        );
-        return;
-    }
-
-    // 使用后立即清理临时缓存
-    deleteStore(
-        pendingKey
-    );
-
-    const template =
-        parseJSON(raw);
-
-    if (!template) {
-        log(
-            actionInfo.action +
-            "：请求缓存解析失败"
-        );
-        return;
-    }
-
-    template.action =
-        actionInfo.action;
-
-    template.updateTime =
-        Date.now();
-
-    saveTemplate(
-        actionInfo.key,
-        template,
-        actionInfo.notify,
-        actionInfo.subtitle,
-        actionInfo.body
-    );
-}
-
-
 function main() {
+
     try {
-        /*
-         * Surge 会把同一个 JS 分别声明成
-         * http-request 与 http-response。
-         */
+
         if (
-            typeof $response !==
-            "undefined"
+            typeof $request ===
+                "undefined" ||
+            !$request
         ) {
-            captureResponse();
-        } else {
-            captureRequest();
+
+            log(
+                "当前不是 http-request 环境"
+            );
+
+            return;
         }
 
-    } catch (e) {
+
+        const info =
+            detectAction();
+
+
+        if (!info) {
+
+            log(
+                "当前请求未识别为目标接口"
+            );
+
+            return;
+        }
+
+
         log(
-            "运行异常：" +
+            "识别接口：" +
+            info.action
+        );
+
+
+        const template =
+            buildTemplate(
+                info.action
+            );
+
+
+        if (!template) {
+            return;
+        }
+
+
+        saveTemplate(
+            info,
+            template
+        );
+
+
+    } catch (e) {
+
+        log(
+            "捕获异常：" +
             String(e)
         );
     }
 }
 
 
+/*
+ * 启动。
+ */
 try {
+
     main();
 
 } catch (e) {
+
     log(
         "主程序异常：" +
         String(e)
     );
 
 } finally {
+
     finish();
 }
