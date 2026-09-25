@@ -1,134 +1,58 @@
 /*
- * Vae+ 授权 / 请求模板捕获
- * Surge 单 http-request 版本
+ * Vae+ Surge 单 http-request 诊断版
  *
- * Surge 配置：
+ * 目的：
+ * 找出 Vae+ 请求 Body 中是否存在可以直接识别
+ * getRecord / getRecordByMonth / getTaskList / completeTask
+ * 的字段。
  *
- * Vae+ 授权获取 = type=http-request, pattern=^https:\/\/api1\.starfans\.com\/auth\/, requires-body=true, script-path=你的脚本地址, timeout=10, debug=true
- *
- * MITM：
- *
- * hostname = %APPEND% api1.starfans.com
- *
- * 持久化模板：
- *
- * VAE_STATUS_REQUEST
- *   /USER_HOME/getRecord.json
- *
- * VAE_SIGN_REQUEST
- *   /USER_HOME/getRecordByMonth.json
- *
- * VAE_TASK_LIST_REQUEST
- *   /GAME/getTaskList.json
- *
- * VAE_DAILY_REWARD_REQUEST
- *   /GAME/completeTask.json + taskKey=201
+ * 注意：
+ * - 不保存 Cookie
+ * - 不保存 Authorization
+ * - 不保存请求模板
+ * - 不打印完整 Body
+ * - 只输出结构和可能有用的识别字段
  */
-
-const STATUS_KEY = "VAE_STATUS_REQUEST";
-const SIGN_KEY = "VAE_SIGN_REQUEST";
-const TASK_LIST_KEY = "VAE_TASK_LIST_REQUEST";
-const DAILY_REWARD_KEY = "VAE_DAILY_REWARD_REQUEST";
-
 
 function log(message) {
     console.log(
-        "[Vae+ Auth] " + message
+        "[Vae+ Diagnose] " + message
     );
 }
 
 
 function finish() {
-    /*
-     * 不修改原始请求。
-     */
     $done({});
 }
 
 
-function readStore(key) {
-    try {
-        return $persistentStore.read(key);
-    } catch (e) {
-        log(
-            "读取持久化数据失败：" +
-            String(e)
-        );
-
-        return null;
-    }
-}
-
-
-function writeStore(key, value) {
-    try {
-        return $persistentStore.write(
-            String(value),
-            key
-        );
-    } catch (e) {
-        log(
-            "写入持久化数据失败：" +
-            String(e)
-        );
-
-        return false;
-    }
-}
-
-
-function readTemplate(key) {
-    const raw = readStore(key);
-
-    if (!raw) {
-        return null;
-    }
-
-    try {
-        return JSON.parse(raw);
-    } catch (e) {
-        return null;
-    }
-}
-
-
-function cleanHeaders(headers) {
-    const result = {};
-
+function getHeader(headers, name) {
     if (!headers) {
-        return result;
+        return "";
     }
 
-    Object.keys(headers)
-        .sort(function (a, b) {
-            return a
-                .toLowerCase()
-                .localeCompare(
-                    b.toLowerCase()
-                );
-        })
-        .forEach(function (key) {
+    const target =
+        String(name).toLowerCase();
 
-            const lower =
-                key.toLowerCase();
+    const keys =
+        Object.keys(headers);
 
-            /*
-             * 这些 Header 重放时不应该固定保存。
-             */
-            if (
-                lower === "content-length" ||
-                lower === "host" ||
-                lower === "connection" ||
-                lower === "accept-encoding"
-            ) {
-                return;
-            }
+    for (
+        let i = 0;
+        i < keys.length;
+        i++
+    ) {
+        if (
+            keys[i].toLowerCase() ===
+            target
+        ) {
+            return String(
+                headers[keys[i]] || ""
+            );
+        }
+    }
 
-            result[key] =
-                headers[key];
-        });
-
-    return result;
+    return "";
 }
 
 
@@ -137,17 +61,41 @@ function safeDecode(text) {
         return "";
     }
 
-    try {
-        return decodeURIComponent(
-            String(text)
-                .replace(
-                    /\+/g,
-                    "%20"
-                )
-        );
-    } catch (e) {
-        return String(text);
+    let result =
+        String(text);
+
+    /*
+     * 最多尝试三层 URL Decode。
+     */
+    for (
+        let i = 0;
+        i < 3;
+        i++
+    ) {
+        try {
+            const decoded =
+                decodeURIComponent(
+                    result.replace(
+                        /\+/g,
+                        "%20"
+                    )
+                );
+
+            if (
+                decoded === result
+            ) {
+                break;
+            }
+
+            result =
+                decoded;
+
+        } catch (e) {
+            break;
+        }
     }
+
+    return result;
 }
 
 
@@ -165,372 +113,419 @@ function parseJSON(text) {
 
 
 /*
- * 递归展开 JSON。
- *
- * 用来兼容接口名位于：
- * - JSON 字段
- * - 嵌套 JSON
- * - 数组
- *
- * 中的情况。
+ * 敏感字段永远不输出值。
  */
-function flattenJSON(
-    value,
-    output
-) {
-    output =
-        output || [];
+function isSensitiveKey(key) {
+    const text =
+        String(key || "")
+            .toLowerCase();
 
+    return (
+        text.indexOf("cookie") !== -1 ||
+        text.indexOf("token") !== -1 ||
+        text.indexOf("authorization") !== -1 ||
+        text.indexOf("passwd") !== -1 ||
+        text.indexOf("password") !== -1 ||
+        text.indexOf("secret") !== -1 ||
+        text.indexOf("session") !== -1 ||
+        text.indexOf("jsessid") !== -1 ||
+        text.indexOf("sign") !== -1 ||
+        text.indexOf("deviceid") !== -1 ||
+        text.indexOf("openid") !== -1 ||
+        text.indexOf("userid") !== -1 ||
+        text === "uid"
+    );
+}
+
+
+/*
+ * 这些字段最可能包含业务接口标识。
+ */
+function isInterestingKey(key) {
+    const text =
+        String(key || "")
+            .toLowerCase();
+
+    const words = [
+        "action",
+        "api",
+        "path",
+        "url",
+        "uri",
+        "request",
+        "method",
+        "service",
+        "module",
+        "function",
+        "func",
+        "command",
+        "cmd",
+        "task",
+        "key",
+        "type",
+        "name",
+        "route",
+        "target"
+    ];
+
+    for (
+        let i = 0;
+        i < words.length;
+        i++
+    ) {
+        if (
+            text.indexOf(
+                words[i]
+            ) !== -1
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+function safeValue(value) {
     if (
         value === null ||
         value === undefined
     ) {
-        return output;
+        return String(value);
     }
 
     if (
-        typeof value === "string" ||
         typeof value === "number" ||
         typeof value === "boolean"
     ) {
-        output.push(
-            String(value)
-        );
-
-        return output;
-    }
-
-    if (Array.isArray(value)) {
-
-        value.forEach(
-            function (item) {
-                flattenJSON(
-                    item,
-                    output
-                );
-            }
-        );
-
-        return output;
+        return String(value);
     }
 
     if (
-        typeof value === "object"
+        typeof value !== "string"
     ) {
-
-        Object.keys(value)
-            .forEach(
-                function (key) {
-
-                    output.push(
-                        String(key)
-                    );
-
-                    flattenJSON(
-                        value[key],
-                        output
-                    );
-                }
-            );
+        return (
+            "[" +
+            typeof value +
+            "]"
+        );
     }
 
-    return output;
+    let text =
+        safeDecode(value);
+
+    /*
+     * 防止误输出很长数据。
+     */
+    if (
+        text.length > 160
+    ) {
+        text =
+            text.substring(
+                0,
+                160
+            ) +
+            "...";
+    }
+
+    return text;
 }
 
 
-/*
- * 生成用于接口识别的文本。
- *
- * 同时检查：
- * - URL
- * - URL Decode 后的 URL
- * - Body
- * - URL Decode 后的 Body
- * - JSON 展开内容
- */
-function buildSearchText() {
+function inspectJSON(
+    value,
+    path,
+    depth,
+    result
+) {
+    if (
+        depth > 8 ||
+        value === null ||
+        value === undefined
+    ) {
+        return;
+    }
 
-    const parts = [];
+    if (
+        Array.isArray(value)
+    ) {
+        result.paths.push(
+            path + "[]"
+        );
 
-    const url =
-        (
-            typeof $request !==
-                "undefined" &&
-            $request &&
-            $request.url
-        )
-            ? String(
-                $request.url
-            )
-            : "";
-
-    const body =
-        (
-            typeof $request !==
-                "undefined" &&
-            $request &&
-            typeof $request.body ===
-                "string"
-        )
-            ? $request.body
-            : "";
-
-    parts.push(url);
-    parts.push(body);
-
-    parts.push(
-        safeDecode(url)
-    );
-
-    parts.push(
-        safeDecode(body)
-    );
-
-
-    /*
-     * 尝试把 Body 当 JSON 解析。
-     */
-    const json =
-        parseJSON(body);
-
-    if (json) {
-
-        const flattened =
-            flattenJSON(
-                json
+        const limit =
+            Math.min(
+                value.length,
+                3
             );
 
-        parts.push(
-            flattened.join("\n")
-        );
+        for (
+            let i = 0;
+            i < limit;
+            i++
+        ) {
+            inspectJSON(
+                value[i],
+                path + "[" + i + "]",
+                depth + 1,
+                result
+            );
+        }
+
+        return;
     }
 
 
-    /*
-     * URL Decode 后再尝试解析 JSON。
-     */
-    const decodedBody =
-        safeDecode(body);
-
     if (
-        decodedBody &&
-        decodedBody !== body
+        typeof value ===
+        "object"
     ) {
+        const keys =
+            Object.keys(value);
 
-        const decodedJSON =
-            parseJSON(
-                decodedBody
+        for (
+            let i = 0;
+            i < keys.length;
+            i++
+        ) {
+            const key =
+                keys[i];
+
+            const newPath =
+                path
+                    ? path + "." + key
+                    : key;
+
+            result.paths.push(
+                newPath
             );
 
-        if (decodedJSON) {
+            if (
+                !isSensitiveKey(key) &&
+                isInterestingKey(key)
+            ) {
+                const child =
+                    value[key];
 
-            const flattened =
-                flattenJSON(
-                    decodedJSON
-                );
+                if (
+                    typeof child === "string" ||
+                    typeof child === "number" ||
+                    typeof child === "boolean"
+                ) {
+                    result.interesting.push(
+                        newPath +
+                        "=" +
+                        safeValue(child)
+                    );
+                }
+            }
 
-            parts.push(
-                flattened.join("\n")
+            inspectJSON(
+                value[key],
+                newPath,
+                depth + 1,
+                result
+            );
+        }
+    }
+}
+
+
+function inspectForm(body) {
+    const result = {
+        keys: [],
+        interesting: []
+    };
+
+    if (!body) {
+        return result;
+    }
+
+    const items =
+        body.split("&");
+
+    for (
+        let i = 0;
+        i < items.length;
+        i++
+    ) {
+        if (!items[i]) {
+            continue;
+        }
+
+        const pos =
+            items[i].indexOf("=");
+
+        let rawKey;
+        let rawValue;
+
+        if (pos === -1) {
+            rawKey =
+                items[i];
+
+            rawValue =
+                "";
+        } else {
+            rawKey =
+                items[i]
+                    .substring(
+                        0,
+                        pos
+                    );
+
+            rawValue =
+                items[i]
+                    .substring(
+                        pos + 1
+                    );
+        }
+
+        const key =
+            safeDecode(
+                rawKey
+            );
+
+        const value =
+            safeDecode(
+                rawValue
+            );
+
+        result.keys.push(
+            key
+        );
+
+        if (
+            !isSensitiveKey(key) &&
+            isInterestingKey(key)
+        ) {
+            result.interesting.push(
+                key +
+                "=" +
+                safeValue(value)
             );
         }
     }
 
-
-    return parts.join("\n");
+    return result;
 }
 
 
 /*
- * 判断 taskKey=201。
+ * 尝试直接寻找类似：
+ *
+ * /USER_HOME/getRecord.json
+ * /GAME/getTaskList.json
+ *
+ * 这样的路径。
  */
-function containsTask201(text) {
+function findRouteStrings(text) {
+    const result = [];
 
     if (!text) {
-        return false;
+        return result;
     }
 
-    return (
-        text.indexOf(
-            "taskKey=201"
-        ) !== -1 ||
+    const decoded =
+        safeDecode(text);
 
-        text.indexOf(
-            "taskKey%3D201"
-        ) !== -1 ||
+    const regex =
+        /\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\.json(?:[?&][A-Za-z0-9_.=%-]+)*/g;
 
-        text.indexOf(
-            "\"taskKey\":201"
-        ) !== -1 ||
+    const matches =
+        decoded.match(regex);
 
-        text.indexOf(
-            "\"taskKey\":\"201\""
-        ) !== -1 ||
+    if (!matches) {
+        return result;
+    }
 
-        text.indexOf(
-            "'taskKey':201"
-        ) !== -1 ||
+    for (
+        let i = 0;
+        i < matches.length;
+        i++
+    ) {
+        if (
+            result.indexOf(
+                matches[i]
+            ) === -1
+        ) {
+            result.push(
+                matches[i]
+            );
+        }
+    }
 
-        text.indexOf(
-            "'taskKey':'201'"
-        ) !== -1 ||
-
-        /taskKey[\s:=&"']+201/i
-            .test(text)
-    );
+    return result;
 }
 
 
-/*
- * 识别请求类型。
- */
-function detectAction() {
-
-    const text =
-        buildSearchText();
-
-    if (!text) {
-
-        log(
-            "请求 URL 和 Body 均为空"
+function detectKnownWords(text) {
+    const decoded =
+        safeDecode(
+            text || ""
         );
 
-        return null;
-    }
+    const targets = [
+        "USER_HOME",
+        "GAME",
+        "getRecord",
+        "getRecordByMonth",
+        "getTaskList",
+        "completeTask",
+        "taskKey",
+        "201"
+    ];
 
+    const found = [];
 
-    /*
-     * 每日登录奖励
-     *
-     * completeTask 必须最优先判断。
-     */
-    if (
-        text.indexOf(
-            "/GAME/completeTask.json"
-        ) !== -1 &&
-        containsTask201(text)
+    for (
+        let i = 0;
+        i < targets.length;
+        i++
     ) {
-
-        return {
-
-            key:
-                DAILY_REWARD_KEY,
-
-            action:
-                "/GAME/completeTask.json&taskKey=201",
-
-            notify:
-                true,
-
-            subtitle:
-                "每日登录奖励请求已保存",
-
-            notifyBody:
-                "taskKey=201"
-        };
+        if (
+            decoded.indexOf(
+                targets[i]
+            ) !== -1
+        ) {
+            found.push(
+                targets[i]
+            );
+        }
     }
 
-
-    /*
-     * 每日任务列表
-     */
-    if (
-        text.indexOf(
-            "/GAME/getTaskList.json"
-        ) !== -1
-    ) {
-
-        return {
-
-            key:
-                TASK_LIST_KEY,
-
-            action:
-                "/GAME/getTaskList.json",
-
-            notify:
-                false
-        };
-    }
-
-
-    /*
-     * 每月签到接口
-     *
-     * 必须放在 getRecord 前面，
-     * 避免被 getRecord 误匹配。
-     */
-    if (
-        text.indexOf(
-            "/USER_HOME/getRecordByMonth.json"
-        ) !== -1
-    ) {
-
-        return {
-
-            key:
-                SIGN_KEY,
-
-            action:
-                "/USER_HOME/getRecordByMonth.json",
-
-            notify:
-                true,
-
-            subtitle:
-                "签到请求已更新",
-
-            notifyBody:
-                "getRecordByMonth"
-        };
-    }
-
-
-    /*
-     * 签到状态接口
-     */
-    if (
-        text.indexOf(
-            "/USER_HOME/getRecord.json"
-        ) !== -1
-    ) {
-
-        return {
-
-            key:
-                STATUS_KEY,
-
-            action:
-                "/USER_HOME/getRecord.json",
-
-            notify:
-                false
-        };
-    }
-
-
-    return null;
+    return found;
 }
 
 
-/*
- * 构造可供自动签到脚本重放的请求模板。
- */
-function buildTemplate(action) {
-
+function main() {
     if (
         typeof $request ===
             "undefined" ||
         !$request
     ) {
-
         log(
-            action +
-            "：不存在 $request"
+            "不存在 $request"
         );
 
-        return null;
+        return;
     }
 
+
+    const url =
+        String(
+            $request.url ||
+            ""
+        );
+
+    const method =
+        String(
+            $request.method ||
+            ""
+        );
+
+    const headers =
+        $request.headers ||
+        {};
 
     const body =
         typeof $request.body ===
@@ -538,316 +533,240 @@ function buildTemplate(action) {
             ? $request.body
             : "";
 
-
-    if (!body) {
-
-        log(
-            action +
-            "：请求 Body 为空"
-        );
-
-        return null;
-    }
-
-
-    const headers =
-        cleanHeaders(
-            $request.headers ||
-            {}
-        );
-
-
-    return {
-
-        version: 7,
-
-        action:
-            action,
-
-        url:
-            $request.url ||
-            "",
-
-        method:
-            (
-                $request.method ||
-                "POST"
-            ).toUpperCase(),
-
-        headers:
+    const contentType =
+        getHeader(
             headers,
-
-        body:
-            body,
-
-        updateTime:
-            Date.now()
-    };
-}
-
-
-/*
- * updateTime 不参与模板变化判断。
- */
-function normalizeTemplate(
-    template
-) {
-
-    if (!template) {
-        return null;
-    }
-
-
-    return {
-
-        action:
-            template.action ||
-            "",
-
-        url:
-            template.url ||
-            "",
-
-        method:
-            (
-                template.method ||
-                "POST"
-            ).toUpperCase(),
-
-        headers:
-            template.headers ||
-            {},
-
-        body:
-            template.body ||
-            ""
-    };
-}
-
-
-function templatesEqual(
-    oldTemplate,
-    newTemplate
-) {
-
-    if (
-        !oldTemplate ||
-        !newTemplate
-    ) {
-        return false;
-    }
-
-
-    try {
-
-        return (
-            JSON.stringify(
-                normalizeTemplate(
-                    oldTemplate
-                )
-            ) ===
-            JSON.stringify(
-                normalizeTemplate(
-                    newTemplate
-                )
-            )
+            "Content-Type"
         );
-
-    } catch (e) {
-
-        return false;
-    }
-}
-
-
-/*
- * 保存请求模板。
- */
-function saveTemplate(
-    info,
-    template
-) {
-
-    if (
-        !info ||
-        !template
-    ) {
-        return false;
-    }
-
-
-    const oldTemplate =
-        readTemplate(
-            info.key
-        );
-
-
-    const changed =
-        !templatesEqual(
-            oldTemplate,
-            template
-        );
-
-
-    const success =
-        writeStore(
-            info.key,
-            JSON.stringify(
-                template
-            )
-        );
-
-
-    if (!success) {
-
-        log(
-            template.action +
-            "：持久化失败"
-        );
-
-        return false;
-    }
 
 
     log(
-        "已保存：" +
-        template.action
+        "=============================="
     );
 
+    log(
+        "URL: " +
+        url
+    );
 
     log(
         "Method: " +
-        template.method
+        method
     );
 
+    log(
+        "Content-Type: " +
+        (
+            contentType ||
+            "(empty)"
+        )
+    );
 
     log(
         "Body length: " +
-        template.body.length
+        body.length
     );
 
 
-    /*
-     * 状态查询、任务列表：
-     * 静默更新。
-     *
-     * 签到、每日登录奖励：
-     * 首次捕获或内容变化时通知。
-     */
-    if (
-        info.notify &&
-        changed
-    ) {
-
-        $notification.post(
-            "Vae+ 授权更新",
-            info.subtitle ||
-                "",
-            info.notifyBody ||
-                ""
-        );
-    }
-
-
-    if (
-        info.notify &&
-        !changed
-    ) {
-
+    if (!body) {
         log(
-            template.action +
-            "：模板未变化，静默更新"
+            "Body: EMPTY"
+        );
+
+        return;
+    }
+
+
+    /*
+     * 先直接查找已知关键词。
+     */
+    const knownWords =
+        detectKnownWords(
+            body
+        );
+
+    if (
+        knownWords.length > 0
+    ) {
+        log(
+            "Known words: " +
+            knownWords.join(", ")
+        );
+    } else {
+        log(
+            "Known words: NONE"
         );
     }
 
 
-    return true;
-}
+    /*
+     * 查找类似 /xxx/xxx.json 的字符串。
+     */
+    const routes =
+        findRouteStrings(
+            body
+        );
+
+    if (
+        routes.length > 0
+    ) {
+        log(
+            "Route strings: " +
+            routes.join(" | ")
+        );
+    } else {
+        log(
+            "Route strings: NONE"
+        );
+    }
 
 
-/*
- * 主程序。
- */
-function main() {
+    /*
+     * JSON
+     */
+    const json =
+        parseJSON(body);
 
-    try {
+    if (json) {
+        log(
+            "Body format: JSON"
+        );
+
+        const result = {
+            paths: [],
+            interesting: []
+        };
+
+        inspectJSON(
+            json,
+            "",
+            0,
+            result
+        );
 
         if (
-            typeof $request ===
-                "undefined" ||
-            !$request
+            result.paths.length > 0
         ) {
+            log(
+                "JSON paths: " +
+                result.paths
+                    .slice(
+                        0,
+                        80
+                    )
+                    .join(" | ")
+            );
+        }
+
+        if (
+            result.interesting.length > 0
+        ) {
+            log(
+                "Interesting values: " +
+                result.interesting
+                    .slice(
+                        0,
+                        40
+                    )
+                    .join(" | ")
+            );
+        } else {
+            log(
+                "Interesting values: NONE"
+            );
+        }
+
+        return;
+    }
+
+
+    /*
+     * application/x-www-form-urlencoded
+     */
+    if (
+        body.indexOf("=") !== -1
+    ) {
+        const form =
+            inspectForm(
+                body
+            );
+
+        if (
+            form.keys.length > 0
+        ) {
+            log(
+                "Body format: FORM?"
+            );
 
             log(
-                "当前不是 http-request 环境"
+                "Form keys: " +
+                form.keys
+                    .slice(
+                        0,
+                        80
+                    )
+                    .join(" | ")
             );
+
+            if (
+                form.interesting.length > 0
+            ) {
+                log(
+                    "Interesting values: " +
+                    form.interesting
+                        .slice(
+                            0,
+                            40
+                        )
+                        .join(" | ")
+                );
+            } else {
+                log(
+                    "Interesting values: NONE"
+                );
+            }
 
             return;
         }
+    }
 
 
-        const info =
-            detectAction();
-
-
-        if (!info) {
-
-            log(
-                "当前请求未识别为目标接口"
-            );
-
-            return;
-        }
-
-
-        log(
-            "识别接口：" +
-            info.action
+    /*
+     * 看起来像 Base64 时，只标记，不直接打印。
+     */
+    const compact =
+        body.replace(
+            /\s/g,
+            ""
         );
 
-
-        const template =
-            buildTemplate(
-                info.action
-            );
-
-
-        if (!template) {
-            return;
-        }
-
-
-        saveTemplate(
-            info,
-            template
-        );
-
-
-    } catch (e) {
-
+    if (
+        compact.length >= 24 &&
+        compact.length % 4 === 0 &&
+        /^[A-Za-z0-9+/=]+$/.test(
+            compact
+        )
+    ) {
         log(
-            "捕获异常：" +
-            String(e)
+            "Body format: BASE64-like"
+        );
+    } else {
+        log(
+            "Body format: UNKNOWN / ENCRYPTED"
         );
     }
 }
 
 
-/*
- * 启动。
- */
 try {
-
     main();
 
 } catch (e) {
-
     log(
-        "主程序异常：" +
+        "诊断异常：" +
         String(e)
     );
 
 } finally {
-
     finish();
 }
