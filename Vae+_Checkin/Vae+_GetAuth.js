@@ -1,71 +1,37 @@
 /*
- * Vae+ 请求捕获 / 持久化
- * Vae_GetAuth.js
+ * Vae+ 请求捕获 / 持久化 - Surge
  *
- * Loon 类型：
- * http-response
+ * 同一个脚本同时用于：
+ * 1. http-request：暂存请求 URL / Header / Body
+ * 2. http-response：根据响应 requestVar 判断接口类型并保存模板
  *
- * 表达式：
- * ^https:\/\/api1\.starfans\.com\/auth\/
- *
- * 设置：
- * 响应 Body：开启
- * 二进制 Body：关闭
- *
- * 保存的请求模板：
- *
- * VAE_STATUS_REQUEST
- *   /USER_HOME/getRecord.json
- *
- * VAE_SIGN_REQUEST
- *   /USER_HOME/getRecordByMonth.json
- *
- * VAE_TASK_LIST_REQUEST
- *   /GAME/getTaskList.json
- *
- * VAE_DAILY_REWARD_REQUEST
- *   /GAME/completeTask.json&taskKey=201
- *
- * 通知：
- * - 状态查询、任务列表：静默更新
- * - 签到请求、每日登录奖励请求：
- *   首次捕获或模板变化时通知
+ * Surge 必须：
+ * - http-request requires-body=true
+ * - http-response requires-body=true
+ * - MITM api1.starfans.com
  */
 
-const STATUS_KEY =
-    "VAE_STATUS_REQUEST";
+const STATUS_KEY = "VAE_STATUS_REQUEST";
+const SIGN_KEY = "VAE_SIGN_REQUEST";
+const TASK_LIST_KEY = "VAE_TASK_LIST_REQUEST";
+const DAILY_REWARD_KEY = "VAE_DAILY_REWARD_REQUEST";
 
-const SIGN_KEY =
-    "VAE_SIGN_REQUEST";
-
-const TASK_LIST_KEY =
-    "VAE_TASK_LIST_REQUEST";
-
-const DAILY_REWARD_KEY =
-    "VAE_DAILY_REWARD_REQUEST";
+const PENDING_PREFIX = "VAE_PENDING_";
 
 
 function log(message) {
-    console.log(
-        "[Vae+ Auth] " + message
-    );
+    console.log("[Vae+ Auth] " + message);
 }
 
 
 function finish() {
-    /*
-     * 保持 Vae+ 原始响应不变。
-     */
-    $done({
-        response: $response
-    });
+    // Surge 中 $done({}) 表示请求/响应保持不变
+    $done({});
 }
 
 
 function parseJSON(text) {
-    if (!text) {
-        return null;
-    }
+    if (!text) return null;
 
     try {
         return JSON.parse(text);
@@ -75,153 +41,216 @@ function parseJSON(text) {
 }
 
 
+function readStore(key) {
+    try {
+        return $persistentStore.read(key);
+    } catch (e) {
+        return null;
+    }
+}
+
+
+function writeStore(key, value) {
+    try {
+        return $persistentStore.write(
+            String(value),
+            key
+        );
+    } catch (e) {
+        return false;
+    }
+}
+
+
+function deleteStore(key) {
+    try {
+        return $persistentStore.write(
+            null,
+            key
+        );
+    } catch (e) {
+        return false;
+    }
+}
+
+
 function cleanHeaders(headers) {
     const result = {};
 
-    if (!headers) {
-        return result;
-    }
+    if (!headers) return result;
 
-    Object.keys(headers)
-        .forEach(function (key) {
+    Object.keys(headers).forEach(function (key) {
+        const lower = key.toLowerCase();
 
-            const lower =
-                key.toLowerCase();
+        if (
+            lower === "content-length" ||
+            lower === "host" ||
+            lower === "connection" ||
+            lower === "accept-encoding"
+        ) {
+            return;
+        }
 
-            if (
-                lower ===
-                    "content-length" ||
-                lower === "host" ||
-                lower === "connection" ||
-                lower ===
-                    "accept-encoding"
-            ) {
-                return;
-            }
-
-            result[key] =
-                headers[key];
-        });
+        result[key] = headers[key];
+    });
 
     return result;
 }
 
 
-function readTemplate(key) {
-    try {
-
-        const raw =
-            $persistentStore.read(key);
-
-        if (!raw) {
-            return null;
-        }
-
-        return JSON.parse(raw);
-
-    } catch (e) {
-
-        return null;
+function getPendingKey() {
+    if (
+        typeof $request === "undefined" ||
+        !$request ||
+        !$request.id
+    ) {
+        return "";
     }
+
+    const id = String($request.id)
+        .replace(/[^A-Za-z0-9_.-]/g, "_");
+
+    return PENDING_PREFIX + id;
 }
 
 
 function normalizeTemplate(template) {
-    if (!template) {
-        return null;
-    }
+    if (!template) return null;
 
-    /*
-     * updateTime 不参与比较。
-     */
     return {
-
-        action:
-            template.action || "",
-
-        url:
-            template.url || "",
-
-        method:
-            (
-                template.method ||
-                "POST"
-            ).toUpperCase(),
-
-        headers:
-            template.headers || {},
-
-        body:
-            template.body || ""
+        action: template.action || "",
+        url: template.url || "",
+        method: (
+            template.method ||
+            "POST"
+        ).toUpperCase(),
+        headers: template.headers || {},
+        body: template.body || ""
     };
 }
 
 
-function templatesEqual(
-    oldTemplate,
-    newTemplate
-) {
-    if (
-        !oldTemplate ||
-        !newTemplate
-    ) {
+function templatesEqual(oldTemplate, newTemplate) {
+    if (!oldTemplate || !newTemplate) {
         return false;
     }
 
     try {
-
         return (
             JSON.stringify(
-                normalizeTemplate(
-                    oldTemplate
-                )
-            )
-            ===
+                normalizeTemplate(oldTemplate)
+            ) ===
             JSON.stringify(
-                normalizeTemplate(
-                    newTemplate
-                )
+                normalizeTemplate(newTemplate)
             )
         );
-
     } catch (e) {
-
         return false;
     }
 }
 
 
-function buildTemplate(action) {
+function readTemplate(key) {
+    const raw = readStore(key);
+
+    if (!raw) return null;
+
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        return null;
+    }
+}
+
+
+function saveTemplate(
+    key,
+    template,
+    notifyChange,
+    notifySubtitle,
+    notifyBody
+) {
+    if (!template) return false;
+
+    const oldTemplate =
+        readTemplate(key);
+
+    const changed =
+        !templatesEqual(
+            oldTemplate,
+            template
+        );
+
+    const success =
+        writeStore(
+            key,
+            JSON.stringify(template)
+        );
+
+    if (!success) {
+        log(
+            template.action +
+            "：持久化失败"
+        );
+
+        return false;
+    }
+
+    log(
+        "已保存：" +
+        template.action
+    );
+
+    log(
+        "Body length: " +
+        String(
+            template.body || ""
+        ).length
+    );
 
     if (
-        typeof $request ===
-            "undefined" ||
-        !$request
+        notifyChange &&
+        changed
     ) {
-        return null;
+        $notification.post(
+            "Vae+ 授权更新",
+            notifySubtitle || "",
+            notifyBody || ""
+        );
+    }
+
+    return true;
+}
+
+
+/*
+ * 第一阶段：
+ * http-request
+ *
+ * Surge 的 response script 不提供 request body，
+ * 因此先在这里暂存。
+ */
+function captureRequest() {
+    const pendingKey =
+        getPendingKey();
+
+    if (!pendingKey) {
+        log("缺少 request.id");
+        return;
     }
 
     const body =
-        typeof $request.body ===
-            "string"
+        typeof $request.body === "string"
             ? $request.body
             : "";
 
     if (!body) {
-
-        log(
-            action +
-            "：请求 Body 为空"
-        );
-
-        return null;
+        log("请求 Body 为空");
+        return;
     }
 
-    return {
-
-        version: 5,
-
-        action: action,
+    const pending = {
+        version: 6,
 
         url:
             $request.url || "",
@@ -234,8 +263,7 @@ function buildTemplate(action) {
 
         headers:
             cleanHeaders(
-                $request.headers ||
-                {}
+                $request.headers || {}
             ),
 
         body: body,
@@ -243,69 +271,32 @@ function buildTemplate(action) {
         updateTime:
             Date.now()
     };
-}
 
-
-function saveTemplate(
-    key,
-    template
-) {
-    if (!template) {
-        return false;
-    }
-
-    try {
-
-        const success =
-            $persistentStore.write(
-                JSON.stringify(
-                    template
-                ),
-                key
-            );
-
-        if (success === false) {
-
-            log(
-                template.action +
-                "：持久化失败"
-            );
-
-            return false;
-        }
-
-        log(
-            "已保存：" +
-            template.action
+    const success =
+        writeStore(
+            pendingKey,
+            JSON.stringify(pending)
         );
 
+    if (success) {
         log(
-            "Body length: " +
-            template.body.length
+            "已暂存请求：" +
+            $request.id
         );
-
-        return true;
-
-    } catch (e) {
-
-        log(
-            "保存异常：" +
-            String(e)
-        );
-
-        return false;
+    } else {
+        log("暂存请求失败");
     }
 }
 
 
+/*
+ * 从响应中获取真实接口动作。
+ */
 function getRequestVar() {
-
     if (
-        typeof $response ===
-            "undefined" ||
+        typeof $response === "undefined" ||
         !$response ||
-        typeof $response.body !==
-            "string"
+        typeof $response.body !== "string"
     ) {
         return "";
     }
@@ -315,280 +306,181 @@ function getRequestVar() {
             $response.body
         );
 
-    if (!json) {
-        return "";
-    }
+    if (!json) return "";
 
+    return typeof json.requestVar === "string"
+        ? json.requestVar
+        : "";
+}
+
+
+function getActionInfo(requestVar) {
+    if (!requestVar) return null;
+
+    // completeTask 必须优先
     if (
-        typeof json.requestVar ===
-            "string"
-    ) {
-        return json.requestVar;
-    }
-
-    return "";
-}
-
-
-/*
- * 静默保存：
- * getRecord
- */
-
-function handleStatusRequest() {
-
-    const action =
-        "/USER_HOME/getRecord.json";
-
-    const template =
-        buildTemplate(action);
-
-    if (!template) {
-        return;
-    }
-
-    if (
-        saveTemplate(
-            STATUS_KEY,
-            template
-        )
-    ) {
-
-        log(
-            "状态查询模板更新成功"
-        );
-    }
-}
-
-
-/*
- * 签到请求：
- * getRecordByMonth
- */
-
-function handleSignRequest() {
-
-    const action =
-        "/USER_HOME/getRecordByMonth.json";
-
-    const oldTemplate =
-        readTemplate(
-            SIGN_KEY
-        );
-
-    const newTemplate =
-        buildTemplate(action);
-
-    if (!newTemplate) {
-        return;
-    }
-
-    const changed =
-        !templatesEqual(
-            oldTemplate,
-            newTemplate
-        );
-
-    const saved =
-        saveTemplate(
-            SIGN_KEY,
-            newTemplate
-        );
-
-    if (!saved) {
-        return;
-    }
-
-    if (changed) {
-
-        log(
-            "签到请求模板发生变化"
-        );
-
-        $notification.post(
-            "Vae+ 授权更新",
-            "签到请求已更新",
-            "getRecordByMonth"
-        );
-
-    } else {
-
-        log(
-            "签到请求模板未变化，静默更新"
-        );
-    }
-}
-
-
-/*
- * 任务列表：
- * getTaskList
- */
-
-function handleTaskListRequest() {
-
-    const action =
-        "/GAME/getTaskList.json";
-
-    const template =
-        buildTemplate(action);
-
-    if (!template) {
-        return;
-    }
-
-    if (
-        saveTemplate(
-            TASK_LIST_KEY,
-            template
-        )
-    ) {
-
-        log(
-            "任务列表模板更新成功"
-        );
-    }
-}
-
-
-/*
- * 每日登录奖励：
- * taskKey=201
- */
-
-function handleDailyRewardRequest() {
-
-    const action =
-        "/GAME/completeTask.json&taskKey=201";
-
-    const oldTemplate =
-        readTemplate(
-            DAILY_REWARD_KEY
-        );
-
-    const newTemplate =
-        buildTemplate(action);
-
-    if (!newTemplate) {
-        return;
-    }
-
-    const changed =
-        !templatesEqual(
-            oldTemplate,
-            newTemplate
-        );
-
-    const saved =
-        saveTemplate(
-            DAILY_REWARD_KEY,
-            newTemplate
-        );
-
-    if (!saved) {
-        return;
-    }
-
-    if (changed) {
-
-        log(
-            "每日登录奖励请求模板发生变化"
-        );
-
-        $notification.post(
-            "Vae+ 授权更新",
-            "每日登录奖励请求已保存",
+        requestVar.indexOf(
+            "/GAME/completeTask.json"
+        ) !== -1 &&
+        requestVar.indexOf(
             "taskKey=201"
-        );
-
-    } else {
-
-        log(
-            "每日登录奖励模板未变化，静默更新"
-        );
+        ) !== -1
+    ) {
+        return {
+            key: DAILY_REWARD_KEY,
+            action:
+                "/GAME/completeTask.json&taskKey=201",
+            notify: true,
+            subtitle:
+                "每日登录奖励请求已保存",
+            body:
+                "taskKey=201"
+        };
     }
+
+    if (
+        requestVar.indexOf(
+            "/GAME/getTaskList.json"
+        ) !== -1
+    ) {
+        return {
+            key: TASK_LIST_KEY,
+            action:
+                "/GAME/getTaskList.json",
+            notify: false
+        };
+    }
+
+    // getRecordByMonth 必须在 getRecord 之前
+    if (
+        requestVar.indexOf(
+            "/USER_HOME/getRecordByMonth.json"
+        ) !== -1
+    ) {
+        return {
+            key: SIGN_KEY,
+            action:
+                "/USER_HOME/getRecordByMonth.json",
+            notify: true,
+            subtitle:
+                "签到请求已更新",
+            body:
+                "getRecordByMonth"
+        };
+    }
+
+    if (
+        requestVar.indexOf(
+            "/USER_HOME/getRecord.json"
+        ) !== -1
+    ) {
+        return {
+            key: STATUS_KEY,
+            action:
+                "/USER_HOME/getRecord.json",
+            notify: false
+        };
+    }
+
+    return null;
+}
+
+
+/*
+ * 第二阶段：
+ * http-response
+ */
+function captureResponse() {
+    const requestVar =
+        getRequestVar();
+
+    if (!requestVar) {
+        return;
+    }
+
+    const actionInfo =
+        getActionInfo(
+            requestVar
+        );
+
+    if (!actionInfo) {
+        return;
+    }
+
+    const pendingKey =
+        getPendingKey();
+
+    if (!pendingKey) {
+        log(
+            actionInfo.action +
+            "：无法取得 request.id"
+        );
+        return;
+    }
+
+    const raw =
+        readStore(
+            pendingKey
+        );
+
+    if (!raw) {
+        log(
+            actionInfo.action +
+            "：未找到对应请求缓存"
+        );
+        return;
+    }
+
+    // 使用后立即清理临时缓存
+    deleteStore(
+        pendingKey
+    );
+
+    const template =
+        parseJSON(raw);
+
+    if (!template) {
+        log(
+            actionInfo.action +
+            "：请求缓存解析失败"
+        );
+        return;
+    }
+
+    template.action =
+        actionInfo.action;
+
+    template.updateTime =
+        Date.now();
+
+    saveTemplate(
+        actionInfo.key,
+        template,
+        actionInfo.notify,
+        actionInfo.subtitle,
+        actionInfo.body
+    );
 }
 
 
 function main() {
-
     try {
-
-        const requestVar =
-            getRequestVar();
-
-        if (!requestVar) {
-            return;
-        }
-
-
         /*
-         * completeTask 必须优先判断。
+         * Surge 会把同一个 JS 分别声明成
+         * http-request 与 http-response。
          */
-
         if (
-            requestVar.indexOf(
-                "/GAME/completeTask.json"
-            ) !== -1 &&
-            requestVar.indexOf(
-                "taskKey=201"
-            ) !== -1
+            typeof $response !==
+            "undefined"
         ) {
-
-            handleDailyRewardRequest();
-            return;
-        }
-
-
-        /*
-         * getTaskList
-         */
-
-        if (
-            requestVar.indexOf(
-                "/GAME/getTaskList.json"
-            ) !== -1
-        ) {
-
-            handleTaskListRequest();
-            return;
-        }
-
-
-        /*
-         * getRecordByMonth
-         * 必须在 getRecord 前判断。
-         */
-
-        if (
-            requestVar.indexOf(
-                "/USER_HOME/getRecordByMonth.json"
-            ) !== -1
-        ) {
-
-            handleSignRequest();
-            return;
-        }
-
-
-        /*
-         * getRecord
-         */
-
-        if (
-            requestVar.indexOf(
-                "/USER_HOME/getRecord.json"
-            ) !== -1
-        ) {
-
-            handleStatusRequest();
-            return;
+            captureResponse();
+        } else {
+            captureRequest();
         }
 
     } catch (e) {
-
         log(
-            "捕获异常：" +
+            "运行异常：" +
             String(e)
         );
     }
@@ -596,17 +488,14 @@ function main() {
 
 
 try {
-
     main();
 
 } catch (e) {
-
     log(
         "主程序异常：" +
         String(e)
     );
 
 } finally {
-
     finish();
 }
