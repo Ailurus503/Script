@@ -120,6 +120,12 @@
         return null;
     }
     function notify(message) { console.log('[Vae+ AutoSign] '+message);if(typeof $notification!=='undefined') $notification.post('Vae+ 自动签到','',message); }
+    function signSummary(record) {
+        const total=Number(record.totalCount), streak=Number(record.continuity);
+        return Number.isSafeInteger(total) && total>=0 && Number.isSafeInteger(streak) && streak>=0
+            ? '累计签到 '+total+' 天，连续签到 '+streak+' 天'
+            : '签到天数暂不可用';
+    }
     async function main() {
         const auth=JSON.parse($persistentStore.read(AUTH_KEY)||'{}');
         if(!auth.cookie || !auth.userId || !auth.sslPubKey || !auth.uvkey || !auth.uvsign)
@@ -128,24 +134,27 @@
         const status=await request('/USER_HOME/getRecord.json',{loginUserId:auth.userId},auth,key);
         if(!status.signRecord || typeof status.signRecord.signToday!=='boolean') fail('签到状态响应缺少 signRecord');
         let signedNow=false;
+        let signRecord=status.signRecord;
         if(!status.signRecord.signToday) {
             await request('/USER_HOME/addRecord.json',{loginUserId:auth.userId},auth,key);
             const confirmed=await request('/USER_HOME/getRecord.json',{loginUserId:auth.userId},auth,key);
             if(!confirmed.signRecord || confirmed.signRecord.signToday!==true) fail('签到请求后未获服务器确认');
+            signRecord=confirmed.signRecord;
             signedNow=true;
         }
+        const signedMessage=(signedNow?'签到成功':'今日已签到')+'；'+signSummary(signRecord);
         const taskParams={loginUserId:auth.userId,page:'1',pageNo:'1',pageSize:'10'};
         const taskResult=await request('/GAME/getTaskList.json',taskParams,auth,key);
         const task=findTask(taskResult);
         if(!task) fail('未找到每日登录任务 taskKey=201');
-        if(task.receiveReward===true) { notify(signedNow?'签到成功；每日登录奖励已领取':'今日已签到；每日登录奖励已领取');return; }
+        if(task.receiveReward===true) { notify(signedMessage+'；每日登录奖励已领取');return; }
         if(task.complete===true && task.canReceive===true) {
             await request('/GAME/completeTask.json',{loginUserId:auth.userId,taskKey:'201'},auth,key);
             const check=findTask(await request('/GAME/getTaskList.json',taskParams,auth,key));
             if(!check || check.receiveReward!==true) fail('领取请求已发送，但奖励未获服务器确认');
-            notify((signedNow?'签到成功':'今日已签到')+'；每日登录奖励领取成功');return;
+            notify(signedMessage+'；每日登录奖励领取成功');return;
         }
-        notify((signedNow?'签到成功':'今日已签到')+'；每日登录奖励尚不满足领取条件');
+        notify(signedMessage+'；每日登录奖励尚不满足领取条件');
     }
     main().catch(e=>notify('执行失败：'+String(e.message||e))).finally(()=>$done());
 })();
