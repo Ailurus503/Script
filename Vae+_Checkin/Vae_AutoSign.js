@@ -544,7 +544,6 @@
             );
         }
 
-        lines.push('');
         lines.push(
             '每日登录奖励：' +
             rewardText
