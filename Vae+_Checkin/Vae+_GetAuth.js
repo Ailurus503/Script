@@ -50,6 +50,7 @@
         if (saved.userId && incomingUser && saved.userId !== incomingUser) {
             Object.keys(saved).forEach(k => delete saved[k]);
         }
+        const previousCookie = String(saved.cookie || '');
         let cookieCaptured = false;
         const cookie = header($request.headers, 'Cookie');
         if (cookie) {
@@ -81,6 +82,21 @@
             console.log('[Vae+ GetAuth] 登录响应未找到 sslPubKey；字段：' + Object.keys(result).join(','));
         }
         if (Object.keys(saved).length) {
+            const authReady = Boolean(saved.cookie && saved.userId && saved.sslPubKey && saved.uvkey && saved.uvsign);
+            const cookieChanged = cookieCaptured && saved.cookie !== previousCookie;
+            const shouldNotify = authReady && (saved.authNoticeVersion !== 1 || cookieChanged);
+            if (shouldNotify && typeof $notification !== 'undefined') {
+                try {
+                    $notification.post(
+                        'Vae+ 授权获取',
+                        'Cookie 已捕获',
+                        '授权资料已保存，可以运行 Vae+ 每日签到。'
+                    );
+                    saved.authNoticeVersion = 1;
+                } catch (e) {
+                    console.log('[Vae+ GetAuth] 通知发送失败：' + String(e));
+                }
+            }
             saved.updatedAt = Date.now();
             $persistentStore.write(JSON.stringify(saved), KEY);
             const cookieStatus = cookieCaptured ? '本次捕获' : (saved.cookie ? '已有保存' : '未获取');
