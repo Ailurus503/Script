@@ -6,6 +6,11 @@
 
     const AUTH_KEY = 'VAE_AUTH_V2';
     const URL = 'https://api1.starfans.com/auth/';
+    const REQUEST_TIMEOUT_SECONDS = 20;
+    const RUN_TIMEOUT_MS = 45000;
+    const CONFIRM_DELAYS_MS = [0, 1000, 2000, 3000];
+    let runDeadline = 0;
+
     const DEVICE_KEYS = [
         'app_o',
         'app_v',
@@ -374,6 +379,21 @@
                 q.length
             );
 
+            const remainingMs = runDeadline - Date.now();
+
+            if (remainingMs <= 0) {
+                reject(new Error('本轮任务已达总时限'));
+                return;
+            }
+
+            const requestTimeoutSeconds = Math.max(
+                1,
+                Math.min(
+                    REQUEST_TIMEOUT_SECONDS,
+                    Math.ceil(remainingMs / 1000)
+                )
+            );
+
             const headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Accept': 'application/json',
@@ -389,7 +409,7 @@
                     url: URL,
                     headers,
                     body: 'q=' + encodeURIComponent(q),
-                    timeout: 20
+                    timeout: requestTimeoutSeconds
                 },
                 (err, res, data) => {
                     if (err) {
@@ -450,6 +470,38 @@
                 }
             );
         });
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function pollFor(read, accept) {
+        let lastError = '';
+
+        for (const delay of CONFIRM_DELAYS_MS) {
+            if (delay > 0) {
+                await sleep(delay);
+            }
+
+            try {
+                const value = await read();
+
+                if (accept(value)) {
+                    return {
+                        value,
+                        lastError: ''
+                    };
+                }
+            } catch (e) {
+                lastError = String(e.message || e);
+            }
+        }
+
+        return {
+            value: null,
+            lastError
+        };
     }
 
     function findTask(root) {
@@ -556,6 +608,8 @@
     }
 
     async function main() {
+        runDeadline = Date.now() + RUN_TIMEOUT_MS;
+
         const auth = JSON.parse(
             $persistentStore.read(AUTH_KEY) || '{}'
         );
@@ -598,34 +652,52 @@
         let signRecord = status.signRecord;
 
         if (!status.signRecord.signToday) {
-            await request(
-                '/USER_HOME/addRecord.json',
-                {
-                    loginUserId: auth.userId
-                },
-                auth,
-                key
+            let signRequestError = '';
+
+            try {
+                await request(
+                    '/USER_HOME/addRecord.json',
+                    {
+                        loginUserId: auth.userId
+                    },
+                    auth,
+                    key
+                );
+            } catch (e) {
+                // POST 可能已被服务器处理，只是响应丢失；先查状态，不盲目重发。
+                signRequestError = String(e.message || e);
+            }
+
+            const confirmation = await pollFor(
+                () => request(
+                    '/USER_HOME/getRecord.json',
+                    {
+                        loginUserId: auth.userId
+                    },
+                    auth,
+                    key
+                ),
+                value =>
+                    value.signRecord &&
+                    value.signRecord.signToday === true
             );
 
-            const confirmed = await request(
-                '/USER_HOME/getRecord.json',
-                {
-                    loginUserId: auth.userId
-                },
-                auth,
-                key
-            );
+            if (!confirmation.value) {
+                const detail = confirmation.lastError
+                    ? '；状态查询错误：' + confirmation.lastError
+                    : '';
+                const requestDetail = signRequestError
+                    ? '；签到请求错误：' + signRequestError
+                    : '';
 
-            if (
-                !confirmed.signRecord ||
-                confirmed.signRecord.signToday !== true
-            ) {
                 fail(
-                    '签到请求后未获服务器确认'
+                    '签到结果暂未确认，请先检查 Vae+ 签到状态再重试' +
+                    requestDetail +
+                    detail
                 );
             }
 
-            signRecord = confirmed.signRecord;
+            signRecord = confirmation.value.signRecord;
             signedNow = true;
         }
 
@@ -665,31 +737,47 @@
             task.complete === true &&
             task.canReceive === true
         ) {
-            await request(
-                '/GAME/completeTask.json',
-                {
-                    loginUserId: auth.userId,
-                    taskKey: '201'
-                },
-                auth,
-                key
-            );
+            let rewardRequestError = '';
 
-            const check = findTask(
+            try {
                 await request(
-                    '/GAME/getTaskList.json',
-                    taskParams,
+                    '/GAME/completeTask.json',
+                    {
+                        loginUserId: auth.userId,
+                        taskKey: '201'
+                    },
                     auth,
                     key
-                )
+                );
+            } catch (e) {
+                // 领取请求同样可能“已处理但响应丢失”；只重查领取状态。
+                rewardRequestError = String(e.message || e);
+            }
+
+            const confirmation = await pollFor(
+                async () => findTask(
+                    await request(
+                        '/GAME/getTaskList.json',
+                        taskParams,
+                        auth,
+                        key
+                    )
+                ),
+                value => value && value.receiveReward === true
             );
 
-            if (
-                !check ||
-                check.receiveReward !== true
-            ) {
+            if (!confirmation.value) {
+                const detail = confirmation.lastError
+                    ? '；状态查询错误：' + confirmation.lastError
+                    : '';
+                const requestDetail = rewardRequestError
+                    ? '；领取请求错误：' + rewardRequestError
+                    : '';
+
                 fail(
-                    '领取请求已发送，但奖励未获服务器确认'
+                    '奖励状态暂未确认，请检查 Vae+ 奖励状态后再重试' +
+                    requestDetail +
+                    detail
                 );
             }
 
