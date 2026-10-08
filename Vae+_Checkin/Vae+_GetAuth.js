@@ -38,13 +38,24 @@
         let device = {};
         try { device = JSON.parse(rv.data || '{}'); } catch (_) {}
         const saved = JSON.parse($persistentStore.read(KEY) || '{}');
+        const requestUrl = String(($request || {}).url || '');
+        const actionText = String(rv.action || '') + ' ' + requestUrl;
+        if (/(?:logout|signout|sign-out|退出登录)/i.test(actionText) && body.state === true) {
+            $persistentStore.write('', KEY);
+            console.log('[Vae+ GetAuth] 已确认退出登录，旧授权资料已清除');
+            return $done({});
+        }
         const loginUser = body.result && body.result.userInfo && body.result.userInfo.userId;
         const incomingUser = String(loginUser || device.userId || rv.userId || '');
         if (saved.userId && incomingUser && saved.userId !== incomingUser) {
             Object.keys(saved).forEach(k => delete saved[k]);
         }
+        let cookieCaptured = false;
         const cookie = header($request.headers, 'Cookie');
-        if (cookie) saved.cookie = cookie;
+        if (cookie) {
+            saved.cookie = cookie;
+            cookieCaptured = true;
+        }
         const setCookie = header($response.headers, 'Set-Cookie');
         if (setCookie) {
             const first = setCookie.split(';')[0].trim();
@@ -53,6 +64,7 @@
                 const old = String(saved.cookie || '').split(';').map(x => x.trim()).filter(x => x && x.split('=')[0] !== name);
                 old.push(first);
                 saved.cookie = old.join('; ');
+                cookieCaptured = true;
             }
         }
         const agent = header($request.headers, 'User-Agent');
@@ -71,7 +83,8 @@
         if (Object.keys(saved).length) {
             saved.updatedAt = Date.now();
             $persistentStore.write(JSON.stringify(saved), KEY);
-            console.log('[Vae+ GetAuth] 授权资料已更新；公钥=' + (saved.sslPubKey ? '已获取' : '尚未捕获登录响应'));
+            const cookieStatus = cookieCaptured ? '本次捕获' : (saved.cookie ? '已有保存' : '未获取');
+            console.log('[Vae+ GetAuth] 授权资料已更新；Cookie=' + cookieStatus + '；公钥=' + (saved.sslPubKey ? '已获取' : '尚未捕获登录响应'));
         }
     } catch (e) {
         console.log('[Vae+ GetAuth] 解析失败：' + String(e));
